@@ -2,10 +2,10 @@
 """
 End-to-End Orchestrator: Multi-Source Reconciliation Agent Pipeline.
 
-Executes all 3 phases sequentially:
-1. Synthetic Data Generation (generate_data.py)
+Executes all phases sequentially:
+1. Synthetic Data Generation with Noise (generate_data.py)
 2. Database Setup & Ingestion (db_setup.py)
-3. Exact Matching Engine (exact_matcher.py)
+3. Exact & Fuzzy Matching Engine (exact_matcher.py)
 
 Usage:
     python run_pipeline.py
@@ -29,22 +29,14 @@ import exact_matcher
 
 def run_pipeline():
     start_time = time.time()
-    print("=" * 80)
-    print("  RAZORPAY AI BUILDATHON: MULTI-SOURCE RECONCILIATION AGENT PIPELINE")
-    print("=" * 80)
+    print("[*] Running Pipeline: Data Gen -> DB Setup -> Matching...")
 
-    print("\n>>> STEP 1 / 3: Executing Synthetic Data Generation...")
     generate_data.main()
-
-    print("\n>>> STEP 2 / 3: Executing Database Setup & Ingestion...")
     db_setup.main()
-
-    print("\n>>> STEP 3 / 3: Executing Exact Matching Engine...")
     exact_matcher.main()
 
     elapsed = time.time() - start_time
-    print(f"\n[★] Entire Pipeline Completed Successfully in {elapsed:.2f} seconds.")
-    print("=" * 80)
+    print(f"[✔] Pipeline completed in {elapsed:.2f}s")
 
 
 if __name__ == "__main__":

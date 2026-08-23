@@ -20,3 +20,6 @@ htmlcov/
 # Database files & journals
 *.db-journal
 *.sqlite3
+
+# Data folder
+data/
