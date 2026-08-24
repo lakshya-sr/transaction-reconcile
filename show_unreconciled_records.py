@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Diagnostic Visualizer: Ground Truth vs. Matcher Failures.
+Diagnostic Visualizer: Unreconciled Records Viewer.
 
-Provides a compact summary view of transactions that the deterministic
-matcher failed to reconcile, exposing the exact numerical discrepancies.
+Identifies and displays all records from ERP, Gateway, and Bank that
+failed to find complete connections in the graph-based reconciliation engine.
 """
 
 import sys
@@ -18,87 +18,94 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from src.config import (
-    DB_PATH, TABLE_ERP, TABLE_GATEWAY, 
-    TABLE_BANK, TABLE_RESULTS, DATA_DIR
+    DB_PATH, TABLE_ERP, TABLE_GATEWAY, TABLE_BANK
 )
 from src.database import get_connection
 
 
-def main():
-    truth_csv = DATA_DIR / "ground_truth.csv"
-    if not truth_csv.exists():
-        print(f"[!] Ground truth CSV not found at {truth_csv}. Please run generate_data.py first.")
-        return
+def truncate_text(text, max_len=40):
+    text = str(text)
+    return text if len(text) <= max_len else text[:max_len-3] + "..."
 
-    # 1. Load Data
-    df_truth = pd.read_csv(truth_csv)
+
+def main():
     conn = get_connection(DB_PATH)
-    df_results = pd.read_sql_query(f"SELECT * FROM {TABLE_RESULTS}", conn)
+    
+    # 1. Load Raw Tables
     df_erp = pd.read_sql_query(f"SELECT * FROM {TABLE_ERP}", conn)
     df_gw = pd.read_sql_query(f"SELECT * FROM {TABLE_GATEWAY}", conn)
     df_bank = pd.read_sql_query(f"SELECT * FROM {TABLE_BANK}", conn)
+    
+    # 2. Load Graph Edges
+    try:
+        df_eg_edges = pd.read_sql_query("SELECT erp_order_id, gateway_payment_id FROM erp_to_gateway_edges", conn)
+        df_gb_edges = pd.read_sql_query("SELECT gateway_payment_id, bank_entry_id FROM gateway_to_bank_edges", conn)
+    except Exception as e:
+        print("[!] Could not read edge tables. Have you run Phase 3 exact matching yet?")
+        conn.close()
+        return
+        
     conn.close()
 
-    # 2. Identify Unmatched Gateway Hubs
-    matched_gw_ids = set(df_results["gateway_payment_id"].dropna())
-    unmatched_gw_ids = df_truth[~df_truth["gw_id"].isin(matched_gw_ids)]["gw_id"].dropna().unique()
-
-    print("=" * 100)
-    print("  UNMATCHED RECORDS VISUALIZER (Compact Ground Truth Comparison)")
-    print("=" * 100)
-    print(f"Total Gateway Records Generated : {len(df_gw)}")
-    print(f"Successfully Matched Records    : {len(matched_gw_ids)}")
-    print(f"Failed Records (To Analyze)     : {len(unmatched_gw_ids)}\n")
-
-    if len(unmatched_gw_ids) == 0:
-        print("[✔] Awesome! All records were perfectly matched by the engine.")
-        return
-
-    # 3. Build Compact Summary Table
-    summary_table = []
+    # 3. Identify Matched IDs from Graph Edges
+    matched_erp = set(df_eg_edges["erp_order_id"].dropna())
+    matched_bank = set(df_gb_edges["bank_entry_id"].dropna())
     
-    for gw_id in unmatched_gw_ids:
-        truth_subset = df_truth[df_truth["gw_id"] == gw_id]
-        erp_ids = truth_subset["erp_id"].dropna().unique()
-        bank_ids = truth_subset["bank_id"].dropna().unique()
+    # A Gateway payment is fully reconciled ONLY if it links to BOTH an ERP and a Bank entry
+    gw_with_erp = set(df_eg_edges["gateway_payment_id"].dropna())
+    gw_with_bank = set(df_gb_edges["gateway_payment_id"].dropna())
+    fully_matched_gw = gw_with_erp.intersection(gw_with_bank)
+    
+    # 4. Filter Unmatched Records
+    unmatched_erp = df_erp[~df_erp["erp_entry_id"].isin(matched_erp)].copy()
+    unmatched_gw = df_gw[~df_gw["payment_id"].isin(fully_matched_gw)].copy()
+    unmatched_bank = df_bank[~df_bank["bank_entry_id"].isin(matched_bank)].copy()
+
+    print("=" * 100)
+    print("  UNRECONCILED RECORDS VIEWER (Graph Database)")
+    print("=" * 100)
+    print(f"Total ERP Records       : {len(df_erp):<4} | Unmatched: {len(unmatched_erp)}")
+    print(f"Total Gateway Records   : {len(df_gw):<4} | Unmatched: {len(unmatched_gw)}")
+    print(f"Total Bank Records      : {len(df_bank):<4} | Unmatched: {len(unmatched_bank)}")
+    print("=" * 100 + "\n")
+
+    # 5. Display ERP Table
+    if not unmatched_erp.empty:
+        print(f"--- UNRECONCILED ERP INVOICES ({len(unmatched_erp)}) ---")
+        display_erp = unmatched_erp[["erp_entry_id", "invoice_number", "gross_amount", "entry_date"]]
+        print(tabulate(display_erp, headers=["ERP ID", "Invoice", "Gross ₹", "Date"], tablefmt="fancy_grid", showindex=False))
+        print("\n")
+    else:
+        print("--- UNRECONCILED ERP INVOICES (0) ---\n[✔] All ERP records fully matched.\n")
+
+    # 6. Display Gateway Table
+    if not unmatched_gw.empty:
+        print(f"--- UNRECONCILED GATEWAY PAYMENTS ({len(unmatched_gw)}) ---")
+        display_gw = unmatched_gw[["payment_id", "gross_amount", "net_settled", "bank_utr", "invoices"]].copy()
+        display_gw["invoices"] = display_gw["invoices"].apply(truncate_text)
         
-        erp_rows = df_erp[df_erp["erp_entry_id"].isin(erp_ids)]
-        gw_row = df_gw[df_gw["payment_id"] == gw_id]
-        bank_rows = df_bank[df_bank["bank_entry_id"].isin(bank_ids)]
-        
-        # Calculate Totals
-        erp_gross = round(erp_rows["gross_amount"].astype(float).sum(), 2) if not erp_rows.empty else 0.0
-        gw_gross = round(float(gw_row.iloc[0]["gross_amount"]), 2) if not gw_row.empty else 0.0
-        gw_net = round(float(gw_row.iloc[0]["net_settled"]), 2) if not gw_row.empty else 0.0
-        bank_credit = round(bank_rows["credit_amount"].astype(float).sum(), 2) if not bank_rows.empty else 0.0
-        
-        # Diagnose the mismatch
-        diff_erp_gw = round(erp_gross - gw_gross, 2)
-        diff_gw_bank = round(gw_net - bank_credit, 2)
-        
-        diagnosis_tags = []
-        if diff_erp_gw != 0:
-            diagnosis_tags.append(f"ERP/GW Diff: ₹{abs(diff_erp_gw):.2f}")
-        if not bank_rows.empty and diff_gw_bank != 0:
-            diagnosis_tags.append(f"GW/Bank Diff: ₹{abs(diff_gw_bank):.2f}")
-        elif bank_rows.empty:
-            diagnosis_tags.append("Bank Record Missing/Delayed")
+        def get_missing_side(gw_id):
+            missing = []
+            if gw_id not in gw_with_erp: missing.append("ERP")
+            if gw_id not in gw_with_bank: missing.append("Bank")
+            return "Missing: " + " & ".join(missing)
             
-        diag_str = " | ".join(diagnosis_tags) if diagnosis_tags else "Unknown structural failure"
+        display_gw["status"] = display_gw["payment_id"].apply(get_missing_side)
+        
+        print(tabulate(display_gw, headers=["Gateway ID", "Gross ₹", "Net ₹", "UTR", "Invoices", "Graph Status"], tablefmt="fancy_grid", showindex=False))
+        print("\n")
+    else:
+        print("--- UNRECONCILED GATEWAY PAYMENTS (0) ---\n[✔] All Gateway records fully matched.\n")
 
-        summary_table.append([
-            gw_id,
-            f"₹ {erp_gross:.2f}",
-            f"₹ {gw_gross:.2f}",
-            f"₹ {gw_net:.2f}",
-            f"₹ {bank_credit:.2f}",
-            diag_str
-        ])
-
-    # 4. Render Table
-    headers = ["Gateway ID", "ERP Gross (True)", "GW Gross", "GW Net", "Bank Credit (True)", "Primary Discrepancy"]
-    print(tabulate(summary_table, headers=headers, tablefmt="fancy_grid"))
-    print("\n")
+    # 7. Display Bank Table
+    if not unmatched_bank.empty:
+        print(f"--- UNRECONCILED BANK DEPOSITS ({len(unmatched_bank)}) ---")
+        display_bank = unmatched_bank[["bank_entry_id", "value_date", "credit_amount", "remittance_info"]].copy()
+        display_bank["remittance_info"] = display_bank["remittance_info"].apply(lambda x: truncate_text(x, 60))
+        print(tabulate(display_bank, headers=["Bank ID", "Date", "Credit ₹", "Remittance Narrative"], tablefmt="fancy_grid", showindex=False))
+        print("\n")
+    else:
+        print("--- UNRECONCILED BANK DEPOSITS (0) ---\n[✔] All Bank records fully matched.\n")
 
 
 if __name__ == "__main__":

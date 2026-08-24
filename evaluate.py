@@ -48,6 +48,7 @@ def main():
     pred_gw_bnk = set(zip(df_gb_pred['gateway_payment_id'], df_gb_pred['bank_entry_id']))
 
     metrics_table = []
+    fp_table= []
     layers = [
         ("Layer 1: ERP ↔ Gateway", true_erp_gw, pred_erp_gw),
         ("Layer 2: Gateway ↔ Bank", true_gw_bnk, pred_gw_bnk)
@@ -65,12 +66,21 @@ def main():
             f"{p:.1%}", f"{r:.1%}", f"{f1:.1%}"
         ])
 
+        fp_table.append([*(pred_set - true_set)])
+
     print("=" * 100)
     print("  STRICT ID GRAPH ACCURACY EVALUATOR")
     print("=" * 100)
     headers = ["Reconciliation Graph Layer", "True Edges", "Pred Edges", "TP", "FP", "FN", "Precision", "Recall", "F1 Score"]
     print(tabulate(metrics_table, headers=headers, tablefmt="fancy_grid"))
     print("=" * 100)
+
+    
+    from itertools import zip_longest
+
+    fp_table = list(zip_longest(*fp_table))
+    print("False positive records:")
+    print(tabulate(fp_table, headers=[layers[0][0], layers[1][0]], tablefmt="fancy_grid"))
 
 if __name__ == "__main__":
     main()
