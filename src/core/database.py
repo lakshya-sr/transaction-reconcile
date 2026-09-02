@@ -216,35 +216,50 @@ def clear_graph_edges(db_path: Path):
 
 def save_graph_edges(erp_gw_edges: list, gw_bank_edges: list, db_path: Path):
     """Insert newly computed graph edges into the predicted result tables."""
+    if not erp_gw_edges and not gw_bank_edges:
+        return
+
     conn = get_connection(db_path)
     try:
         ensure_matching_stage_column(conn, TABLE_ERP_GW_PRED)
         ensure_matching_stage_column(conn, TABLE_GW_BANK_PRED)
 
         cursor = conn.cursor()
-        for edge in erp_gw_edges:
-            cursor.execute("""
+        cursor.execute("PRAGMA synchronous = NORMAL;")
+        cursor.execute("PRAGMA journal_mode = WAL;")
+
+        if erp_gw_edges:
+            erp_params = [
+                (
+                    e["erp_order_id"], e["gateway_payment_id"],
+                    float(e["allocated_amount"]), e["match_type"],
+                    e.get("matching_stage", "Unknown"),
+                    float(e["confidence_score"]), e.get("notes", "")
+                )
+                for e in erp_gw_edges
+            ]
+            cursor.executemany("""
                 INSERT INTO erp_gw_pred
                 (erp_order_id, gateway_payment_id, allocated_amount, match_type, matching_stage, confidence_score, notes)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                edge["erp_order_id"], edge["gateway_payment_id"],
-                edge["allocated_amount"], edge["match_type"],
-                edge.get("matching_stage", "Unknown"),
-                edge["confidence_score"], edge["notes"],
-            ))
+            """, erp_params)
 
-        for edge in gw_bank_edges:
-            cursor.execute("""
+        if gw_bank_edges:
+            gw_params = [
+                (
+                    e["gateway_payment_id"], e["bank_entry_id"],
+                    float(e["allocated_amount"]), e["match_type"],
+                    e.get("matching_stage", "Unknown"),
+                    float(e["confidence_score"]), e.get("notes", "")
+                )
+                for e in gw_bank_edges
+            ]
+            cursor.executemany("""
                 INSERT INTO gw_bank_pred
                 (gateway_payment_id, bank_entry_id, allocated_amount, match_type, matching_stage, confidence_score, notes)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                edge["gateway_payment_id"], edge["bank_entry_id"],
-                edge["allocated_amount"], edge["match_type"],
-                edge.get("matching_stage", "Unknown"),
-                edge["confidence_score"], edge["notes"],
-            ))
+            """, gw_params)
+
         conn.commit()
     finally:
         conn.close()

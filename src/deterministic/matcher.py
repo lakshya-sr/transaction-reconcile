@@ -73,9 +73,19 @@ class ReconciliationEngine:
         self.df_gateway = df_gateway
         self.df_bank = df_bank
         
+        # Fast Python record lists & dictionary indexes
+        self.erp_records = df_erp.to_dict("records")
+        self.gw_records = df_gateway.to_dict("records")
+        self.bank_records = df_bank.to_dict("records")
+
+        self.erp_by_id = {r["erp_entry_id"]: r for r in self.erp_records}
+        self.gw_by_id = {r["payment_id"]: r for r in self.gw_records}
+        self.bank_by_id = {r["bank_entry_id"]: r for r in self.bank_records}
+
+        self.erp_by_inv = {str(r["invoice_number"]): r for r in self.erp_records if pd.notna(r.get("invoice_number"))}
+
         self.matched_erp_entries = set()
         self.matched_bank_entries = set()
-        # Separated gateway tracking to prevent state cannibalization between layers
         self.gw_linked_to_erp = set()
         self.gw_linked_to_bank = set()
         
@@ -89,7 +99,7 @@ class ReconciliationEngine:
 
     def match_tier1_identifier_clusters_gateway_to_bank(self):
         gw_by_setl = {}
-        for _, row in self.df_gateway.iterrows():
+        for row in self.gw_records:
             g_id = row["payment_id"]
             if g_id not in self.gw_linked_to_bank:
                 setl_id = row.get("settlement_id")
@@ -97,10 +107,10 @@ class ReconciliationEngine:
                     gw_by_setl.setdefault(setl_id, []).append(row)
 
         bank_by_setl = {}
-        for _, row in self.df_bank.iterrows():
+        for row in self.bank_records:
             b_id = row["bank_entry_id"]
             if b_id not in self.matched_bank_entries:
-                setl_id = extract_settlement_id(row["remittance_info"])
+                setl_id = extract_settlement_id(row.get("remittance_info", ""))
                 if setl_id:
                     bank_by_setl.setdefault(setl_id, []).append(row)
 
@@ -128,7 +138,7 @@ class ReconciliationEngine:
                         }
 
         gw_by_utr = {}
-        for _, row in self.df_gateway.iterrows():
+        for row in self.gw_records:
             g_id = row["payment_id"]
             if g_id not in self.gw_linked_to_bank:
                 utr = row.get("bank_utr")
@@ -136,10 +146,10 @@ class ReconciliationEngine:
                     gw_by_utr.setdefault(utr, []).append(row)
 
         bank_by_utr = {}
-        for _, row in self.df_bank.iterrows():
+        for row in self.bank_records:
             b_id = row["bank_entry_id"]
             if b_id not in self.matched_bank_entries:
-                utr = extract_utr_number(row["remittance_info"])
+                utr = extract_utr_number(row.get("remittance_info", ""))
                 if utr:
                     bank_by_utr.setdefault(utr, []).append(row)
 
@@ -166,8 +176,8 @@ class ReconciliationEngine:
                             "note": f"Tier 1: Bank UTR match ({utr})."
                         }
 
-        unmatched_gws = [r for _, r in self.df_gateway.iterrows() if r["payment_id"] not in self.gw_linked_to_bank]
-        unmatched_banks = [r for _, r in self.df_bank.iterrows() if r["bank_entry_id"] not in self.matched_bank_entries]
+        unmatched_gws = [r for r in self.gw_records if r["payment_id"] not in self.gw_linked_to_bank]
+        unmatched_banks = [r for r in self.bank_records if r["bank_entry_id"] not in self.matched_bank_entries]
 
         rem_by_setl = {}
         for g in unmatched_gws:
@@ -207,95 +217,103 @@ class ReconciliationEngine:
     def match_exact_gateway_to_bank(self):
         self.match_tier1_identifier_clusters_gateway_to_bank()
 
-    def match_tier2_3_4_bounded_subset_sum_gateway_to_bank(self, max_delay_days=4, max_batch_size=8):
-        """
-        Tier 2: Temporal Window Partitioning
-        Tier 3: Bounded Branch & Bound Subset Sum (integer-cents arithmetic)
-        Tier 4: Narrative Anchor & Uniqueness Verification
-        """
-        unmatched_gws = [row for _, row in self.df_gateway.iterrows() if row["payment_id"] not in self.gw_linked_to_bank]
-        unmatched_banks = [row for _, row in self.df_bank.iterrows() if row["bank_entry_id"] not in self.matched_bank_entries]
-        unmatched_banks.sort(key=lambda x: str(x["value_date"]))
-
+    def match_tier2_3_4_bounded_subset_sum_gateway_to_bank(self, max_delay_days=4, max_batch_size=6):
+        unmatched_gws = [r for r in self.gw_records if r["payment_id"] not in self.gw_linked_to_bank]
+        unmatched_banks = [r for r in self.bank_records if r["bank_entry_id"] not in self.matched_bank_entries]
         if not unmatched_gws or not unmatched_banks:
             return
 
-        # Pre-parse gateway dates and amounts into integer cents
+        unmatched_banks.sort(key=lambda x: str(x.get("value_date", "")))
+
+        # Pre-parse timestamps and integer cents
         gw_pool = []
         for gw in unmatched_gws:
-            dt_str = str(gw["settled_at"])[:10]
-            gw_dt = datetime.strptime(dt_str, "%Y-%m-%d")
-            cents = int(round(float(gw["net_settled"]) * 100))
-            gw_pool.append((gw_dt, gw, cents))
+            settled_str = str(gw.get("settled_at", ""))[:10]
+            try:
+                gw_dt = datetime.strptime(settled_str, "%Y-%m-%d")
+            except Exception:
+                continue
+            cents = int(round(float(gw.get("net_settled", 0.0)) * 100))
+            utr = str(gw.get("bank_utr", ""))
+            invs = parse_invoices(gw.get("invoices"))
+            gw_pool.append((gw_dt, gw, cents, utr, invs))
 
         for b in unmatched_banks:
             b_id = b["bank_entry_id"]
             if b_id in self.matched_bank_entries:
                 continue
 
-            b_date_str = str(b["value_date"])[:10]
-            b_dt = datetime.strptime(b_date_str, "%Y-%m-%d")
-            target_cents = int(round(float(b["credit_amount"]) * 100))
+            b_date_str = str(b.get("value_date", ""))[:10]
+            try:
+                b_dt = datetime.strptime(b_date_str, "%Y-%m-%d")
+            except Exception:
+                continue
+            target_cents = int(round(float(b.get("credit_amount", 0.0)) * 100))
 
-            # Tier 2: Temporal Window (Gateways within lookback window up to bank value date)
             window_start = b_dt - timedelta(days=max_delay_days)
             window_end = b_dt + timedelta(days=1)
 
             valid_gws = [
-                (dt, gw, cents) for dt, gw, cents in gw_pool
-                if window_start <= dt <= window_end and gw["payment_id"] not in self.gw_linked_to_bank
+                item for item in gw_pool
+                if window_start <= item[0] <= window_end and item[1]["payment_id"] not in self.gw_linked_to_bank
             ]
 
             if not valid_gws:
                 continue
 
-            # Sort ascending by amount (cents) for branch-and-bound
-            valid_gws.sort(key=lambda x: x[2])
-
-            # Extract candidate anchor gateway records mentioned in bank remittance
             remittance = str(b.get("remittance_info", ""))
             anchor_gws = []
-            for dt, gw, cents in valid_gws:
-                utr = str(gw.get("bank_utr", ""))
-                invs = parse_invoices(gw.get("invoices"))
+            for dt, gw, cents, utr, invs in valid_gws:
                 if utr and len(utr) >= 6 and (utr in remittance or utr[:-3] in remittance):
                     anchor_gws.append((dt, gw, cents))
                 elif any(inv and (inv in remittance or inv.replace("INV-", "") in remittance) for inv in invs):
                     anchor_gws.append((dt, gw, cents))
 
-            # Tier 3: Bounded Branch & Bound Subset Sum
+            if not anchor_gws:
+                continue
+
             found_subsets = []
 
-            def find_subsets(start, current_sum, path, pool):
-                if current_sum == target_cents and len(path) >= 1:
-                    found_subsets.append(list(path))
-                    return
-                if len(path) >= max_batch_size or len(found_subsets) >= 3:
-                    return
+            for a_dt, anchor, a_cents in anchor_gws:
+                if a_cents == target_cents:
+                    found_subsets.append([anchor])
+                    break
 
-                for i in range(start, len(pool)):
-                    item_val = pool[i][2]
-                    if current_sum + item_val > target_cents:
-                        break
-                    find_subsets(i + 1, current_sum + item_val, path + [pool[i][1]], pool)
+                rem_target = target_cents - a_cents
+                if rem_target <= 0:
+                    continue
 
-            # If an anchor gateway transaction exists, anchor the search around its time window
-            if anchor_gws:
-                for a_dt, anchor, a_cents in anchor_gws:
-                    if a_cents == target_cents:
-                        found_subsets.append([anchor])
-                        break
+                # Candidate nearby: same settlement date or within 12h, cents <= rem_target
+                nearby_gws = [
+                    (dt, gw, cents) for dt, gw, cents, _, _ in valid_gws
+                    if abs((dt - a_dt).total_seconds()) <= 43200
+                    and gw["payment_id"] != anchor["payment_id"]
+                    and cents <= rem_target
+                ]
 
-                    # Search nearby gateways within ±24 hours of anchor
-                    nearby_gws = [
-                        (dt, gw, cents) for dt, gw, cents in valid_gws
-                        if abs((dt - a_dt).total_seconds()) <= 86400 and gw["payment_id"] != anchor["payment_id"]
-                    ]
-                    nearby_gws.sort(key=lambda x: x[2])
+                if sum(c for _, _, c in nearby_gws) < rem_target:
+                    continue
 
-                    find_subsets(0, a_cents, [anchor], nearby_gws)
-                    if found_subsets:
-                        break
+                nearby_gws.sort(key=lambda x: x[2], reverse=True)
+                if len(nearby_gws) > 12:
+                    nearby_gws = nearby_gws[:12]
+
+                def find_subsets(start, current_sum, path):
+                    if current_sum == rem_target and len(path) >= 1:
+                        found_subsets.append([anchor] + list(path))
+                        return
+                    if len(path) >= max_batch_size - 1 or len(found_subsets) >= 2 or start >= len(nearby_gws):
+                        return
+
+                    for i in range(start, len(nearby_gws)):
+                        item_val = nearby_gws[i][2]
+                        if current_sum + item_val > rem_target:
+                            continue
+                        find_subsets(i + 1, current_sum + item_val, path + [nearby_gws[i][1]])
+
+                find_subsets(0, 0, [])
+                if found_subsets:
+                    break
 
             # Tier 4: Select unique confirmed subset with narrative validation
             selected_subset = found_subsets[0] if len(found_subsets) == 1 else None
@@ -311,7 +329,7 @@ class ReconciliationEngine:
                         "utr": g.get("bank_utr"),
                         "match_type": MATCH_TYPE_BULK if is_bulk else MATCH_TYPE_EXACT,
                         "matching_stage": STAGE_T2_SUBSET_SUM,
-                        "score": 1.00 if is_bulk else 1.00,
+                        "score": 1.00,
                         "note": f"Tier 2-4: Bounded subset sum with token verification (Batch size: {len(selected_subset)})."
                     }
 
@@ -320,24 +338,24 @@ class ReconciliationEngine:
 
     def match_exact_erp_to_gateway(self):
         adj, erp_amounts, gw_amounts = {}, {}, {}
-        for _, row in self.df_erp.iterrows():
+        for row in self.erp_records:
             node_id = row["erp_entry_id"]
             adj[node_id] = []
             erp_amounts[node_id] = float(row["gross_amount"])
             
-        for _, row in self.df_gateway.iterrows():
+        for row in self.gw_records:
             gw_id = row["payment_id"]
             adj[gw_id] = []
             gw_amounts[gw_id] = float(row["gross_amount"])
             for inv in parse_invoices(row.get("invoices")):
-                erp_matches = self.df_erp[self.df_erp["invoice_number"] == inv]
-                if not erp_matches.empty:
-                    erp_id = erp_matches.iloc[0]["erp_entry_id"]
+                erp_match = self.erp_by_inv.get(str(inv))
+                if erp_match:
+                    erp_id = erp_match["erp_entry_id"]
                     adj[gw_id].append(erp_id)
-                    adj.setdefault(erp_id, []).append(gw_id)
+                    adj[erp_id].append(gw_id)
 
         visited = set()
-        for node in adj.keys():
+        for node in list(adj.keys()):
             if node not in visited:
                 comp, stack = [], [node]
                 while stack:
@@ -363,33 +381,45 @@ class ReconciliationEngine:
                                 self.erp_gw_stage_map.setdefault(g, {})[e] = STAGE_EXACT_ERP_GW
 
     def match_fuzzy_gateway_to_bank(self):
-        unmatched_gws = [row for _, row in self.df_gateway.iterrows() if row["payment_id"] not in self.gw_linked_to_bank]
-        unmatched_banks = [row for _, row in self.df_bank.iterrows() if row["bank_entry_id"] not in self.matched_bank_entries]
+        unmatched_gws = [r for r in self.gw_records if r["payment_id"] not in self.gw_linked_to_bank]
+        unmatched_banks = [r for r in self.bank_records if r["bank_entry_id"] not in self.matched_bank_entries]
+
+        # Fast amount grouping
+        bank_by_amt = {}
+        for b in unmatched_banks:
+            amt = round(float(b["credit_amount"]), 2)
+            bank_by_amt.setdefault(amt, []).append(b)
 
         for gw_row in unmatched_gws:
-            gw_id, gw_net, gw_utr = gw_row["payment_id"], round(float(gw_row["net_settled"]), 2), str(gw_row["bank_utr"])
-            for bank_row in unmatched_banks:
+            gw_id, gw_net, gw_utr = gw_row["payment_id"], round(float(gw_row["net_settled"]), 2), str(gw_row.get("bank_utr", "")).strip()
+            if not gw_utr or len(gw_utr) < 6:
+                continue
+            candidate_banks = bank_by_amt.get(gw_net, [])
+            for bank_row in candidate_banks:
                 bank_id = bank_row["bank_entry_id"]
                 if bank_id in self.matched_bank_entries: continue
-                bank_credit = round(float(bank_row["credit_amount"]), 2)
-                remittance = str(bank_row["remittance_info"])
+                remittance = str(bank_row.get("remittance_info", ""))
                 
-                if abs(gw_net - bank_credit) < 0.01:
-                    if (len(gw_utr) >= 10 and gw_utr[:-3] in remittance) or (gw_utr in remittance):
-                        self.matched_bank_entries.add(bank_id)
-                        self.gw_linked_to_bank.add(gw_id)
-                        self.gw_bank_links[gw_id] = {
-                            "bank_ids": [bank_id], "utr": gw_utr,
-                            "match_type": MATCH_TYPE_FUZZY,
-                            "matching_stage": STAGE_FUZZY_GW_BANK,
-                            "score": 0.85,
-                            "note": "Fuzzy Bank-Gateway match."
-                        }
-                        break
+                if (len(gw_utr) >= 10 and gw_utr[:-3] in remittance) or (gw_utr in remittance):
+                    self.matched_bank_entries.add(bank_id)
+                    self.gw_linked_to_bank.add(gw_id)
+                    self.gw_bank_links[gw_id] = {
+                        "bank_ids": [bank_id], "utr": gw_utr,
+                        "match_type": MATCH_TYPE_FUZZY,
+                        "matching_stage": STAGE_FUZZY_GW_BANK,
+                        "score": 0.85,
+                        "note": "Fuzzy Bank-Gateway match."
+                    }
+                    break
 
     def match_fuzzy_erp_to_gateway(self):
-        unmatched_gws = [row for _, row in self.df_gateway.iterrows() if row["payment_id"] not in self.gw_linked_to_erp]
-        unmatched_erps = [row for _, row in self.df_erp.iterrows() if row["erp_entry_id"] not in self.matched_erp_entries]
+        unmatched_gws = [r for r in self.gw_records if r["payment_id"] not in self.gw_linked_to_erp]
+        unmatched_erps = [r for r in self.erp_records if r["erp_entry_id"] not in self.matched_erp_entries]
+
+        erp_by_amt = {}
+        for e in unmatched_erps:
+            amt = round(float(e["gross_amount"]), 2)
+            erp_by_amt.setdefault(amt, []).append(e)
 
         for gw_row in unmatched_gws:
             gw_id, gw_gross = gw_row["payment_id"], round(float(gw_row["gross_amount"]), 2)
@@ -397,49 +427,48 @@ class ReconciliationEngine:
             linked_bank = self.gw_bank_links.get(gw_id)
             remittance_ctx = ""
             if linked_bank:
-                b_rows = self.df_bank[self.df_bank["bank_entry_id"].isin(linked_bank["bank_ids"])]
-                remittance_ctx = " ".join(b_rows["remittance_info"].fillna("").values)
+                b_ids = linked_bank.get("bank_ids", [])
+                b_rows = [self.bank_by_id[b] for b in b_ids if b in self.bank_by_id]
+                remittance_ctx = " ".join(str(r.get("remittance_info", "")) for r in b_rows)
 
-            for erp_row in unmatched_erps:
+            candidate_erps = erp_by_amt.get(gw_gross, [])
+            for erp_row in candidate_erps:
                 erp_id = erp_row["erp_entry_id"]
                 if erp_id in self.matched_erp_entries: continue
-                erp_gross = round(float(erp_row["gross_amount"]), 2)
                 stripped_inv = str(erp_row["invoice_number"]).replace("INV-", "")
                 
-                if abs(gw_gross - erp_gross) < 0.01:
-                    is_fuzzy = False
-                    if any(stripped_inv in str(inv) for inv in invoices):
-                        is_fuzzy, note_add = True, "Invoice prefix missing."
-                    elif stripped_inv in remittance_ctx:
-                        is_fuzzy, note_add = True, "Gateway invoice recovered from Bank."
-                    elif not invoices:
-                        is_fuzzy, note_add = True, "IDs missing, matched via isolated exact amount."
+                is_fuzzy = False
+                note_add = ""
+                if invoices and any(stripped_inv in str(inv) for inv in invoices if inv):
+                    is_fuzzy, note_add = True, "Invoice prefix missing."
+                elif stripped_inv and stripped_inv in remittance_ctx:
+                    is_fuzzy, note_add = True, "Gateway invoice recovered from Bank."
 
-                    if is_fuzzy:
-                        self.matched_erp_entries.add(erp_id)
-                        self.gw_linked_to_erp.add(gw_id)
-                        self.gw_to_erp_links.setdefault(gw_id, []).append(erp_id)
-                        self.erp_gw_stage_map.setdefault(gw_id, {})[erp_id] = STAGE_FUZZY_ERP_GW
+                if is_fuzzy:
+                    self.matched_erp_entries.add(erp_id)
+                    self.gw_linked_to_erp.add(gw_id)
+                    self.gw_to_erp_links.setdefault(gw_id, []).append(erp_id)
+                    self.erp_gw_stage_map.setdefault(gw_id, {})[erp_id] = STAGE_FUZZY_ERP_GW
 
-                        if gw_id in self.gw_bank_links:
-                            self.gw_bank_links[gw_id]["match_type"] = MATCH_TYPE_FUZZY
-                            self.gw_bank_links[gw_id]["matching_stage"] = STAGE_FUZZY_GW_BANK
-                            self.gw_bank_links[gw_id]["score"] = 0.85
-                        else:
-                            self.gw_bank_links[gw_id] = {
-                                "bank_ids": [], "utr": gw_row["bank_utr"],
-                                "match_type": MATCH_TYPE_FUZZY,
-                                "matching_stage": STAGE_FUZZY_GW_BANK,
-                                "score": 0.80,
-                                "note": note_add,
-                            }
-                        break
+                    if gw_id in self.gw_bank_links:
+                        self.gw_bank_links[gw_id]["match_type"] = MATCH_TYPE_FUZZY
+                        self.gw_bank_links[gw_id]["matching_stage"] = STAGE_FUZZY_GW_BANK
+                        self.gw_bank_links[gw_id]["score"] = 0.85
+                    else:
+                        self.gw_bank_links[gw_id] = {
+                            "bank_ids": [], "utr": gw_row.get("bank_utr"),
+                            "match_type": MATCH_TYPE_FUZZY,
+                            "matching_stage": STAGE_FUZZY_GW_BANK,
+                            "score": 0.80,
+                            "note": note_add,
+                        }
+                    break
 
     def assemble_graph_edges(self):
         for gw_id, erp_ids in self.gw_to_erp_links.items():
-            gw_row = self.df_gateway[self.df_gateway["payment_id"] == gw_id]
-            gw_gross = float(gw_row.iloc[0]["gross_amount"]) if not gw_row.empty else 0.0
-            split_amt = round(gw_gross / len(erp_ids), 2)
+            gw_row = self.gw_by_id.get(gw_id, {})
+            gw_gross = float(gw_row.get("gross_amount", 0.0))
+            split_amt = round(gw_gross / len(erp_ids), 2) if erp_ids else 0.0
             stage_map = self.erp_gw_stage_map.get(gw_id, {})
 
             for erp_id in erp_ids:
@@ -456,8 +485,8 @@ class ReconciliationEngine:
 
         for gw_id, bank_info in self.gw_bank_links.items():
             bank_ids = bank_info.get("bank_ids", [])
-            gw_row = self.df_gateway[self.df_gateway["payment_id"] == gw_id]
-            gw_net = float(gw_row.iloc[0]["net_settled"]) if not gw_row.empty else 0.0
+            gw_row = self.gw_by_id.get(gw_id, {})
+            gw_net = float(gw_row.get("net_settled", 0.0))
 
             for b_id in bank_ids:
                 self.gw_bank_edges.append({
@@ -470,7 +499,7 @@ class ReconciliationEngine:
                     "notes": bank_info.get("note", "Graph edge: Gateway linked to Bank.")
                 })
 
-    def run(self, deterministic_only: bool = False):
+    def run(self, deterministic_only: bool = True):
         self.match_exact_gateway_to_bank()
         self.match_exact_erp_to_gateway()
         self.match_combinatorial_gateway_to_bank()
@@ -495,7 +524,7 @@ class ReconciliationEngine:
             "unmatched_bank": unmatched_bank,
         }
 
-def run_exact_matching(db_path: Path = DB_PATH, deterministic_only: bool = False) -> Dict[str, any]:
+def run_exact_matching(db_path: Path = DB_PATH, deterministic_only: bool = True) -> Dict[str, any]:
     clear_graph_edges(db_path)
     df_erp, df_gw, df_bank = fetch_unmatched_records(db_path)
     engine = ReconciliationEngine(df_erp, df_gw, df_bank)

@@ -74,7 +74,7 @@ def extract_cluster_features(
         return {col: 0.0 for col in FEATURE_COLUMNS}
 
     bank_credit = float(bank_row.get("credit_amount", 0.0))
-    bank_dt = _parse_dt(bank_row.get("value_date", "2026-01-01"))
+    bank_dt = bank_row.get("_dt") if "_dt" in bank_row else _parse_dt(bank_row.get("value_date", "2026-01-01"))
     remittance = str(bank_row.get("remittance_info") or "")
     remittance_upper = remittance.upper()
 
@@ -85,18 +85,18 @@ def extract_cluster_features(
     dates_set = set()
 
     for g in gw_rows:
-        dt = _parse_dt(g.get("settled_at", "2026-01-01"))
+        dt = g.get("_dt") if "_dt" in g else _parse_dt(g.get("settled_at", "2026-01-01"))
         gw_dts.append(dt)
         dates_set.add(dt.strftime("%Y-%m-%d"))
 
-        net = float(g.get("net_settled", 0.0))
+        net = float(g.get("_net", g.get("net_settled", 0.0)))
         gw_nets.append(net)
 
         utr = str(g.get("bank_utr") or "").strip()
         if utr:
             all_utrs.append(utr)
 
-        invs = _parse_invoices(g.get("invoices"))
+        invs = g.get("_invoices") if "_invoices" in g else _parse_invoices(g.get("invoices"))
         all_invoices.extend(invs)
 
     cluster_size = len(gw_rows)
@@ -116,25 +116,32 @@ def extract_cluster_features(
     utr_prefix_match = 0.0
     for utr in all_utrs:
         utr_clean = utr.upper()
-        ratio = fuzz.ratio(utr_clean, remittance_upper) / 100.0
-        if ratio > best_utr_fuzz:
-            best_utr_fuzz = ratio
+        if utr_clean and utr_clean in remittance_upper:
+            best_utr_fuzz = 1.0
+            utr_prefix_match = 1.0
+            break
         if len(utr_clean) >= 6:
             prefix = utr_clean[:8] if len(utr_clean) >= 8 else utr_clean[:6]
             if prefix in remittance_upper:
                 utr_prefix_match = 1.0
+                best_utr_fuzz = max(best_utr_fuzz, 0.8)
+        if best_utr_fuzz < 0.8:
+            ratio = fuzz.ratio(utr_clean, remittance_upper) / 100.0
+            best_utr_fuzz = max(best_utr_fuzz, ratio)
 
     # Invoice NLP features
     best_inv_fuzz = 0.0
     inv_prefix_match = 0.0
     for inv in all_invoices:
         inv_clean = inv.upper()
-        ratio = fuzz.ratio(inv_clean, remittance_upper) / 100.0
-        if ratio > best_inv_fuzz:
-            best_inv_fuzz = ratio
         stripped_inv = inv_clean.replace("INV-", "").replace("ORD-", "")
         if stripped_inv and (stripped_inv in remittance_upper or inv_clean in remittance_upper):
             inv_prefix_match = 1.0
+            best_inv_fuzz = 1.0
+            break
+        if best_inv_fuzz < 0.8:
+            ratio = fuzz.ratio(inv_clean, remittance_upper) / 100.0
+            best_inv_fuzz = max(best_inv_fuzz, ratio)
 
     return {
         "cluster_size": float(cluster_size),

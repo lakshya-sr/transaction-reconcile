@@ -6,6 +6,7 @@ Generates candidate Gateway clusters (1:1, daily rollups, chronological sequence
 chunks, and identifier prefix groups) for candidate Bank statement deposits.
 """
 
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Dict, List, Set, Tuple, Union
@@ -16,11 +17,16 @@ def _parse_dt(val) -> datetime:
     if isinstance(val, datetime):
         return val
     s = str(val)[:19]
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+    if len(s) == 10:
         try:
-            return datetime.strptime(s, fmt)
+            return datetime(int(s[:4]), int(s[5:7]), int(s[8:10]))
         except ValueError:
-            continue
+            pass
+    elif len(s) >= 19:
+        try:
+            return datetime(int(s[:4]), int(s[5:7]), int(s[8:10]), int(s[11:13]), int(s[14:16]), int(s[17:19]))
+        except ValueError:
+            pass
     return datetime(2026, 1, 1)
 
 
@@ -77,6 +83,7 @@ class CandidateBlockGenerator:
                 gw_by_setl_prefix[setl[:6]].append(rec)
 
         gw_parsed.sort(key=lambda x: x["_dt"])
+        gw_dts = [g["_dt"] for g in gw_parsed]
 
         candidate_blocks = []
         seen_keys: Set[Tuple[str, frozenset]] = set()
@@ -88,11 +95,10 @@ class CandidateBlockGenerator:
             window_start = b_dt - timedelta(days=self.max_delay_days)
             window_end = b_dt + timedelta(days=1)
 
-            # Filter valid gateways within temporal window
-            window_gws = [
-                g for g in gw_parsed
-                if window_start <= g["_dt"] <= window_end
-            ]
+            # Logarithmic binary search for temporal window slicing
+            start_idx = bisect_left(gw_dts, window_start)
+            end_idx = bisect_right(gw_dts, window_end)
+            window_gws = gw_parsed[start_idx:end_idx]
 
             # 1. 1:1 Candidate Blocks
             for g in window_gws:

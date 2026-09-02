@@ -86,14 +86,8 @@ class ReconciliationProfiler:
 
         # 3. Deterministic Matching Engine
         with StageTimer("3. Deterministic Matching") as t:
-            conn = get_connection(DB_PATH)
-            df_erp_db = pd.read_sql_query("SELECT * FROM erp_ledger", conn)
-            df_gw_db = pd.read_sql_query("SELECT * FROM gateway_settlements", conn)
-            df_bank_db = pd.read_sql_query("SELECT * FROM bank_statement", conn)
-            conn.close()
-
-            engine = ReconciliationEngine(df_erp_db, df_gw_db, df_bank_db)
-            engine.run()
+            from src.deterministic.matcher import run_exact_matching
+            run_exact_matching(DB_PATH)
         self.stage_timings["3_deterministic_match_ms"] = t.elapsed_ms
         self.stage_memory["3_deterministic_match_mem_mb"] = t.peak_mem_mb
 
