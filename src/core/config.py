@@ -71,6 +71,7 @@ STAGE_FUZZY_GW_BANK = "Fuzzy:GW-Bank"
 STAGE_FUZZY_ERP_GW  = "Fuzzy:ERP-GW"
 STAGE_CLUSTER_SEED_XGB = "Cluster:Seed-XGB"
 STAGE_CLUSTER_EXPAND_XGB = "Cluster:Expand-XGB"
+STAGE_AI_CLUSTER = "AI:XGBoost-Cluster"
 
 # Regex Patterns for extracting invoice numbers, ERP entry IDs, and UTRs from CAMT.053 remittance info
 INVOICE_REGEX = r"(INV[-_/]?(?:2026[-_/])?[a-zA-Z0-9]{4,10}|ORD[-_]?[a-zA-Z0-9]{4,10})"

@@ -207,7 +207,12 @@ class ReconciliationEngine:
     def match_exact_gateway_to_bank(self):
         self.match_tier1_identifier_clusters_gateway_to_bank()
 
-    def match_tier2_3_4_bounded_subset_sum_gateway_to_bank(self, max_delay_days=10):
+    def match_tier2_3_4_bounded_subset_sum_gateway_to_bank(self, max_delay_days=4, max_batch_size=8):
+        """
+        Tier 2: Temporal Window Partitioning
+        Tier 3: Bounded Branch & Bound Subset Sum (integer-cents arithmetic)
+        Tier 4: Narrative Anchor & Uniqueness Verification
+        """
         unmatched_gws = [row for _, row in self.df_gateway.iterrows() if row["payment_id"] not in self.gw_linked_to_bank]
         unmatched_banks = [row for _, row in self.df_bank.iterrows() if row["bank_entry_id"] not in self.matched_bank_entries]
         unmatched_banks.sort(key=lambda x: str(x["value_date"]))
@@ -215,6 +220,7 @@ class ReconciliationEngine:
         if not unmatched_gws or not unmatched_banks:
             return
 
+        # Pre-parse gateway dates and amounts into integer cents
         gw_pool = []
         for gw in unmatched_gws:
             dt_str = str(gw["settled_at"])[:10]
@@ -231,50 +237,82 @@ class ReconciliationEngine:
             b_dt = datetime.strptime(b_date_str, "%Y-%m-%d")
             target_cents = int(round(float(b["credit_amount"]) * 100))
 
+            # Tier 2: Temporal Window (Gateways within lookback window up to bank value date)
             window_start = b_dt - timedelta(days=max_delay_days)
             window_end = b_dt + timedelta(days=1)
-            
+
             valid_gws = [
-                (dt, gw, cents) for dt, gw, cents in gw_pool 
+                (dt, gw, cents) for dt, gw, cents in gw_pool
                 if window_start <= dt <= window_end and gw["payment_id"] not in self.gw_linked_to_bank
             ]
 
             if not valid_gws:
                 continue
 
-            valid_gws.sort(key=lambda x: x[0])
+            # Sort ascending by amount (cents) for branch-and-bound
+            valid_gws.sort(key=lambda x: x[2])
 
-            sum_map = {0: []}
-            found_match = False
-            
-            for _, gw, cents in valid_gws:
-                for current_sum, path in list(sum_map.items()):
-                    candidate_sum = current_sum + cents
-                    if candidate_sum > target_cents: 
-                        continue
-                    if candidate_sum not in sum_map:
-                        sum_map[candidate_sum] = path + [gw["payment_id"]]
-                    
-                    if candidate_sum == target_cents:
-                        found_match = True
+            # Extract candidate anchor gateway records mentioned in bank remittance
+            remittance = str(b.get("remittance_info", ""))
+            anchor_gws = []
+            for dt, gw, cents in valid_gws:
+                utr = str(gw.get("bank_utr", ""))
+                invs = parse_invoices(gw.get("invoices"))
+                if utr and len(utr) >= 6 and (utr in remittance or utr[:-3] in remittance):
+                    anchor_gws.append((dt, gw, cents))
+                elif any(inv and (inv in remittance or inv.replace("INV-", "") in remittance) for inv in invs):
+                    anchor_gws.append((dt, gw, cents))
+
+            # Tier 3: Bounded Branch & Bound Subset Sum
+            found_subsets = []
+
+            def find_subsets(start, current_sum, path, pool):
+                if current_sum == target_cents and len(path) >= 1:
+                    found_subsets.append(list(path))
+                    return
+                if len(path) >= max_batch_size or len(found_subsets) >= 3:
+                    return
+
+                for i in range(start, len(pool)):
+                    item_val = pool[i][2]
+                    if current_sum + item_val > target_cents:
                         break
-                if found_match:
-                    break
+                    find_subsets(i + 1, current_sum + item_val, path + [pool[i][1]], pool)
 
-            if target_cents in sum_map:
-                payment_ids = sum_map[target_cents]
+            # If an anchor gateway transaction exists, anchor the search around its time window
+            if anchor_gws:
+                for a_dt, anchor, a_cents in anchor_gws:
+                    if a_cents == target_cents:
+                        found_subsets.append([anchor])
+                        break
+
+                    # Search nearby gateways within ±24 hours of anchor
+                    nearby_gws = [
+                        (dt, gw, cents) for dt, gw, cents in valid_gws
+                        if abs((dt - a_dt).total_seconds()) <= 86400 and gw["payment_id"] != anchor["payment_id"]
+                    ]
+                    nearby_gws.sort(key=lambda x: x[2])
+
+                    find_subsets(0, a_cents, [anchor], nearby_gws)
+                    if found_subsets:
+                        break
+
+            # Tier 4: Select unique confirmed subset with narrative validation
+            selected_subset = found_subsets[0] if len(found_subsets) == 1 else None
+
+            if selected_subset:
                 self.matched_bank_entries.add(b_id)
-                is_bulk = len(payment_ids) > 1
-                for gw_id in payment_ids:
-                    self.gw_linked_to_bank.add(gw_id)
-                    gw_row = next(gw for _, gw, _ in valid_gws if gw["payment_id"] == gw_id)
-                    self.gw_bank_links[gw_id] = {
+                is_bulk = len(selected_subset) > 1
+                for g in selected_subset:
+                    g_id = g["payment_id"]
+                    self.gw_linked_to_bank.add(g_id)
+                    self.gw_bank_links[g_id] = {
                         "bank_ids": [b_id],
-                        "utr": gw_row.get("bank_utr"),
+                        "utr": g.get("bank_utr"),
                         "match_type": MATCH_TYPE_BULK if is_bulk else MATCH_TYPE_EXACT,
                         "matching_stage": STAGE_T2_SUBSET_SUM,
                         "score": 1.00 if is_bulk else 1.00,
-                        "note": f"Tier 2-4: Bounded subset sum (Batch size: {len(payment_ids)})."
+                        "note": f"Tier 2-4: Bounded subset sum with token verification (Batch size: {len(selected_subset)})."
                     }
 
     def match_combinatorial_gateway_to_bank(self, max_delay_days=10):
@@ -432,12 +470,13 @@ class ReconciliationEngine:
                     "notes": bank_info.get("note", "Graph edge: Gateway linked to Bank.")
                 })
 
-    def run(self):
+    def run(self, deterministic_only: bool = False):
         self.match_exact_gateway_to_bank()
         self.match_exact_erp_to_gateway()
         self.match_combinatorial_gateway_to_bank()
-        self.match_fuzzy_gateway_to_bank()
-        self.match_fuzzy_erp_to_gateway()
+        if not deterministic_only:
+            self.match_fuzzy_gateway_to_bank()
+            self.match_fuzzy_erp_to_gateway()
         self.assemble_graph_edges()
         
         unmatched_erp = self.df_erp[~self.df_erp["erp_entry_id"].isin(self.matched_erp_entries)].copy()
@@ -456,10 +495,10 @@ class ReconciliationEngine:
             "unmatched_bank": unmatched_bank,
         }
 
-def run_exact_matching(db_path: Path = DB_PATH) -> Dict[str, any]:
+def run_exact_matching(db_path: Path = DB_PATH, deterministic_only: bool = False) -> Dict[str, any]:
     clear_graph_edges(db_path)
     df_erp, df_gw, df_bank = fetch_unmatched_records(db_path)
     engine = ReconciliationEngine(df_erp, df_gw, df_bank)
-    results = engine.run()
+    results = engine.run(deterministic_only=deterministic_only)
     save_graph_edges(results["erp_gw_edges"], results["gw_bank_edges"], db_path)
     return results

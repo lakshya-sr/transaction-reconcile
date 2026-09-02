@@ -1,3 +1,18 @@
 {
-  "threshold": 0.8814170360565186
+  "threshold": 0.9836,
+  "min_precision_target": 0.98,
+  "pr_auc": 0.9997,
+  "feature_columns": [
+    "cluster_size",
+    "amount_diff_abs",
+    "amount_diff_pct",
+    "time_delta_min_hrs",
+    "time_delta_max_hrs",
+    "time_span_hrs",
+    "best_utr_fuzz",
+    "utr_prefix_match",
+    "best_invoice_fuzz",
+    "invoice_prefix_match",
+    "is_single_day"
+  ]
 }

@@ -27,6 +27,7 @@ from src.core.config import (
     STAGE_EXACT_ERP_GW,
     STAGE_FUZZY_ERP_GW,
     STAGE_FUZZY_GW_BANK,
+    STAGE_AI_CLUSTER,
     TABLE_ERP,
     TABLE_GATEWAY,
     TABLE_BANK,
@@ -58,6 +59,7 @@ STAGE_COLORS = {
     STAGE_EXACT_ERP_GW: "#34A853",
     STAGE_FUZZY_ERP_GW: "#FBBC05",
     STAGE_FUZZY_GW_BANK: "#FF7043",
+    STAGE_AI_CLUSTER: "#00BCD4",
 }
 
 # Prediction accuracy edge colors (overlay on predicted graph)
@@ -106,6 +108,8 @@ def get_bnk_html(node_id: str, row: dict, is_matched: bool = True) -> str:
     )
 
 
+COLOR_EDGE_GROUND_TRUTH_ONLY = "#1E88E5"  # Blue for Ground Truth only (unreconciled)
+
 def build_graph(
     df_erp: pd.DataFrame,
     df_gw: pd.DataFrame,
@@ -113,17 +117,22 @@ def build_graph(
     df_eg: pd.DataFrame,
     df_gb: pd.DataFrame,
     include_unmatched: bool = False,
+    is_ground_truth_graph: bool = False,
     true_eg_pairs: Optional[set] = None,
     true_gb_pairs: Optional[set] = None,
+    pred_eg_pairs: Optional[set] = None,
+    pred_gb_pairs: Optional[set] = None,
 ) -> nx.Graph:
     """
     Builds a NetworkX graph with node styling, metadata, and graph edges.
 
-    When `true_eg_pairs` / `true_gb_pairs` are provided (sets of (src_id, dst_id)
-    tuples from the ground-truth tables), each predicted edge is coloured:
-      • Bright green  (#00E676) – edge exists in ground truth  (True Positive)
-      • Red           (#EA4335) – edge NOT in ground truth      (False Positive)
-    If no ground-truth sets are supplied the legacy match-type colouring is used.
+    Modes:
+      1. Ground Truth Graph (is_ground_truth_graph=True):
+         - Correctly predicted edges (in pred pairs): Green (#00E676)
+         - Ground truth only edges (not in pred pairs): Blue (#1E88E5)
+      2. Prediction Graph (is_ground_truth_graph=False):
+         - True Positives (in true pairs): Green (#00E676)
+         - False Positives (not in true pairs): Red (#EA4335)
     """
     G = nx.Graph()
 
@@ -137,8 +146,6 @@ def build_graph(
     matched_gw          = matched_gw_from_erp | matched_gw_from_bnk
     matched_bnk         = set(df_gb["bank_entry_id"].dropna())      if not df_gb.empty else set()
 
-    use_accuracy_colors = true_eg_pairs is not None and true_gb_pairs is not None
-
     # ── 1. ERP ↔ Gateway edges ─────────────────────────────────────────────
     if not df_eg.empty:
         for _, row in df_eg.iterrows():
@@ -146,21 +153,22 @@ def build_graph(
             gw_id  = row["gateway_payment_id"]
             amt    = float(row.get("allocated_amount", 0))
             m_type = str(row.get("match_type", "Exact 1:1")).upper()
-            stage = str(row.get("matching_stage") or row.get("match_type") or "Unknown")
+            stage  = str(row.get("matching_stage") or row.get("match_type") or "Unknown")
 
-            if use_accuracy_colors:
-                if row.get("match_type") == "Ground Truth":
-                    edge_color = COLOR_EDGE_GROUND_TRUTH
-                    accuracy_label = "Ground truth (blue)"
-                else:
-                    is_tp = (erp_id, gw_id) in true_eg_pairs or (gw_id, erp_id) in true_eg_pairs
-                    edge_color = COLOR_EDGE_CORRECT if is_tp else COLOR_EDGE_WRONG
-                    accuracy_label = "✓ Correct" if is_tp else "✗ False Positive"
+            if is_ground_truth_graph:
+                is_reconciled = (
+                    pred_eg_pairs is not None and
+                    ((erp_id, gw_id) in pred_eg_pairs or (gw_id, erp_id) in pred_eg_pairs)
+                )
+                edge_color = COLOR_EDGE_CORRECT if is_reconciled else COLOR_EDGE_GROUND_TRUTH_ONLY
+                accuracy_label = "✓ Reconciled (Correctly Predicted)" if is_reconciled else "Ground Truth Only (Unreconciled)"
             else:
-                edge_color = STAGE_COLORS.get(stage, COLOR_EDGE_DEFAULT)
-                if row.get("match_type") == "Ground Truth":
-                    edge_color = COLOR_EDGE_GROUND_TRUTH
-                accuracy_label = stage or m_type
+                is_tp = (
+                    true_eg_pairs is not None and
+                    ((erp_id, gw_id) in true_eg_pairs or (gw_id, erp_id) in true_eg_pairs)
+                )
+                edge_color = COLOR_EDGE_CORRECT if is_tp else COLOR_EDGE_WRONG
+                accuracy_label = "✓ Correct (TP)" if is_tp else "✗ False Positive (FP)"
 
             if not G.has_node(erp_id):
                 row_data = erp_dict.get(erp_id, {})
@@ -175,7 +183,7 @@ def build_graph(
                            title=get_gw_html(gw_id, row_data, is_matched=True), label=label, size=20)
 
             G.add_edge(erp_id, gw_id,
-                       title=f"Allocated: ₹{amt:,.2f}<br>Type: {m_type}<br>Prediction: {accuracy_label}",
+                       title=f"Allocated: ₹{amt:,.2f}<br>Stage: {stage}<br>Type: {m_type}<br>Status: {accuracy_label}",
                        value=amt, color=edge_color)
 
     # ── 2. Gateway ↔ Bank edges ────────────────────────────────────────────
@@ -185,21 +193,22 @@ def build_graph(
             bnk_id = row["bank_entry_id"]
             amt    = float(row.get("allocated_amount", 0))
             m_type = str(row.get("match_type", "Exact 1:1")).upper()
-            stage = str(row.get("matching_stage") or row.get("match_type") or "Unknown")
+            stage  = str(row.get("matching_stage") or row.get("match_type") or "Unknown")
 
-            if use_accuracy_colors:
-                if row.get("match_type") == "Ground Truth":
-                    edge_color = COLOR_EDGE_GROUND_TRUTH
-                    accuracy_label = "Ground truth (blue)"
-                else:
-                    is_tp = (gw_id, bnk_id) in true_gb_pairs or (bnk_id, gw_id) in true_gb_pairs
-                    edge_color = COLOR_EDGE_CORRECT if is_tp else COLOR_EDGE_WRONG
-                    accuracy_label = "✓ Correct" if is_tp else "✗ False Positive"
+            if is_ground_truth_graph:
+                is_reconciled = (
+                    pred_gb_pairs is not None and
+                    ((gw_id, bnk_id) in pred_gb_pairs or (bnk_id, gw_id) in pred_gb_pairs)
+                )
+                edge_color = COLOR_EDGE_CORRECT if is_reconciled else COLOR_EDGE_GROUND_TRUTH_ONLY
+                accuracy_label = "✓ Reconciled (Correctly Predicted)" if is_reconciled else "Ground Truth Only (Unreconciled)"
             else:
-                edge_color = STAGE_COLORS.get(stage, COLOR_EDGE_DEFAULT)
-                if row.get("match_type") == "Ground Truth":
-                    edge_color = COLOR_EDGE_GROUND_TRUTH
-                accuracy_label = stage or m_type
+                is_tp = (
+                    true_gb_pairs is not None and
+                    ((gw_id, bnk_id) in true_gb_pairs or (bnk_id, gw_id) in true_gb_pairs)
+                )
+                edge_color = COLOR_EDGE_CORRECT if is_tp else COLOR_EDGE_WRONG
+                accuracy_label = "✓ Correct (TP)" if is_tp else "✗ False Positive (FP)"
 
             if not G.has_node(gw_id):
                 row_data = gw_dict.get(gw_id, {})
@@ -214,7 +223,7 @@ def build_graph(
                            title=get_bnk_html(bnk_id, row_data, is_matched=True), label=label, size=20)
 
             G.add_edge(gw_id, bnk_id,
-                       title=f"Allocated: ₹{amt:,.2f}<br>Type: {m_type}<br>Prediction: {accuracy_label}",
+                       title=f"Allocated: ₹{amt:,.2f}<br>Stage: {stage}<br>Type: {m_type}<br>Status: {accuracy_label}",
                        value=amt, color=edge_color)
 
     # ── 3. Unmatched nodes (dimmed) ────────────────────────────────────────
@@ -419,20 +428,16 @@ def render_graph_html(
     with open(output_file, "r", encoding="utf-8") as f:
         html_content = f.read()
 
-    # Build edge legend — accuracy mode vs match-type mode
+    # Build edge legend — accuracy mode vs ground truth mode
     if show_accuracy_legend:
         edge_legend = (
-            "<span style='color:#1E88E5;'>─── Ground Truth (blue)</span> &nbsp;"
-            "<span style='color:#00E676;'>─── Predicted & Correct (green)</span> &nbsp;"
-            "<span style='color:#EA4335;'>─── False Positive (red)</span>"
+            "<span style='color:#00E676;'>─── Correct Prediction (TP)</span> &nbsp;"
+            "<span style='color:#EA4335;'>─── False Positive (FP)</span>"
         )
     else:
         edge_legend = (
-            "<span style='color:#4285F4;'>─── Tier1 Identifier</span> &nbsp;"
-            "<span style='color:#8E44AD;'>─── Tier2 Subset Sum</span> &nbsp;"
-            "<span style='color:#34A853;'>─── Exact ERP↔GW</span> &nbsp;"
-            "<span style='color:#FBBC05;'>─── Fuzzy ERP↔GW</span> &nbsp;"
-            "<span style='color:#FF7043;'>─── Fuzzy GW↔Bank</span>"
+            "<span style='color:#00E676;'>─── Correctly Predicted (green)</span> &nbsp;"
+            "<span style='color:#1E88E5;'>─── Ground Truth Only / Unreconciled (blue)</span>"
         )
 
     ui_injection = f"""
@@ -502,8 +507,8 @@ def generate_graph_visualization(
     (erp_gw_true / gw_bank_true) or predicted matches (erp_gw_pred / gw_bank_pred),
     calculates grid layout, and saves HTML.
 
-    When rendering predicted matches, ground-truth edges are also loaded so that
-    each predicted edge can be coloured green (TP) or red (FP).
+    When rendering ground truth (use_ground_truth=True), predictions are also loaded
+    to highlight correctly predicted edges in green and ground-truth only in blue.
     """
     conn = get_connection(db_path)
     try:
@@ -511,7 +516,7 @@ def generate_graph_visualization(
         df_gw   = pd.read_sql_query(f"SELECT * FROM {TABLE_GATEWAY}", conn)
         df_bank = pd.read_sql_query(f"SELECT * FROM {TABLE_BANK}",    conn)
 
-        # Always load ground truth for accuracy comparison
+        # Always load ground truth
         df_eg_true_raw = pd.read_sql_query(
             f"SELECT erp_id AS erp_order_id, gw_id AS gateway_payment_id FROM {TABLE_ERP_GW_TRUE}", conn
         )
@@ -524,43 +529,41 @@ def generate_graph_visualization(
                 f"SELECT erp_id AS erp_order_id, gw_id AS gateway_payment_id, erp_gw_amount AS allocated_amount FROM {TABLE_ERP_GW_TRUE}", conn
             )
             df_eg_raw["match_type"] = "Ground Truth"
-            df_eg_raw["matching_stage"] = STAGE_EXACT_ERP_GW
             df_gb_raw = pd.read_sql_query(
                 f"SELECT gw_id AS gateway_payment_id, bank_id AS bank_entry_id, gw_bank_amount AS allocated_amount FROM {TABLE_GW_BANK_TRUE}", conn
             )
             df_gb_raw["match_type"] = "Ground Truth"
-            df_gb_raw["matching_stage"] = STAGE_EXACT_ERP_GW
             df_eg = df_eg_raw
             df_gb = df_gb_raw
+
+            # Load predictions to identify correctly reconciled edges
+            df_eg_pred = pd.read_sql_query(f"SELECT * FROM {TABLE_ERP_GW_PRED}", conn)
+            df_gb_pred = pd.read_sql_query(f"SELECT * FROM {TABLE_GW_BANK_PRED}", conn)
+            pred_eg_pairs: set = set(zip(df_eg_pred["erp_order_id"], df_eg_pred["gateway_payment_id"]))
+            pred_gb_pairs: set = set(zip(df_gb_pred["gateway_payment_id"], df_gb_pred["bank_entry_id"]))
             true_eg_pairs = None
             true_gb_pairs = None
         else:
-            df_eg_true = pd.read_sql_query(
-                f"SELECT erp_id AS erp_order_id, gw_id AS gateway_payment_id, erp_gw_amount AS allocated_amount FROM {TABLE_ERP_GW_TRUE}", conn
-            )
-            df_eg_true["match_type"] = "Ground Truth"
-            df_eg_true["matching_stage"] = STAGE_EXACT_ERP_GW
             df_eg_pred = pd.read_sql_query(f"SELECT * FROM {TABLE_ERP_GW_PRED}", conn)
-            df_eg = pd.concat([df_eg_true, df_eg_pred], ignore_index=True)
-
-            df_gb_true = pd.read_sql_query(
-                f"SELECT gw_id AS gateway_payment_id, bank_id AS bank_entry_id, gw_bank_amount AS allocated_amount FROM {TABLE_GW_BANK_TRUE}", conn
-            )
-            df_gb_true["match_type"] = "Ground Truth"
-            df_gb_true["matching_stage"] = STAGE_EXACT_ERP_GW
             df_gb_pred = pd.read_sql_query(f"SELECT * FROM {TABLE_GW_BANK_PRED}", conn)
-            df_gb = pd.concat([df_gb_true, df_gb_pred], ignore_index=True)
+            df_eg = df_eg_pred
+            df_gb = df_gb_pred
 
             true_eg_pairs: set = set(zip(df_eg_true_raw["erp_order_id"], df_eg_true_raw["gateway_payment_id"]))
             true_gb_pairs: set = set(zip(df_gb_true_raw["gateway_payment_id"], df_gb_true_raw["bank_entry_id"]))
+            pred_eg_pairs = None
+            pred_gb_pairs = None
     finally:
         conn.close()
 
     G = build_graph(
         df_erp, df_gw, df_bank, df_eg, df_gb,
         include_unmatched=include_unmatched,
+        is_ground_truth_graph=use_ground_truth,
         true_eg_pairs=true_eg_pairs,
         true_gb_pairs=true_gb_pairs,
+        pred_eg_pairs=pred_eg_pairs,
+        pred_gb_pairs=pred_gb_pairs,
     )
     compute_grid_layout(G)
     saved_path = render_graph_html(G, output_file, heading_title=heading_title, show_accuracy_legend=not use_ground_truth)

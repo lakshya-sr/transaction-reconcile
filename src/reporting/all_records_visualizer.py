@@ -13,19 +13,19 @@ from src.reporting.visualizer import generate_graph_visualization
 
 def main():
     print("=" * 80)
-    print("  COMBINED GROUND TRUTH + PREDICTION VISUALIZER")
+    print("  GROUND TRUTH GRAPH VISUALIZER (erp_gw_true & gw_bank_true)")
     print("=" * 80)
-    print(f"[*] Overlaying predicted edges on the full ground-truth graph: {DB_PATH.name}")
+    print(f"[*] Extracting ground truth edges from database: {DB_PATH.name}")
 
     output_path = generate_graph_visualization(
         db_path=DB_PATH,
         output_file=ALL_DATA_GRAPH_PATH,
-        use_ground_truth=False,
+        use_ground_truth=True,
         include_unmatched=True,
-        heading_title="Ground Truth + Predicted Reconciliation Graph",
+        heading_title="Ground Truth Multi-Source Reconciliation Graph",
     )
 
-    print(f"[✔] Combined visualization saved to: {output_path}")
+    print(f"[✔] Ground truth visualization saved to: {output_path}")
     print("=" * 80)
 
 

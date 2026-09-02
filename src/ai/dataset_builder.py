@@ -1,119 +1,103 @@
 #!/usr/bin/env python3
-"""Build residual Gateway↔Bank training data for the Hard-Residual XGBoost model."""
+"""
+Dataset Builder for Residual XGBoost Cluster Matching.
 
-import sys
+Generates labeled cluster training samples (Positives & Hard Negatives)
+across multiple simulation runs using candidate blocking and feature aggregation.
+"""
+
+from collections import defaultdict
 from pathlib import Path
-
+import random
+import sys
 import pandas as pd
-from rapidfuzz import fuzz
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from src.core.config import DB_PATH
-from src.core.database import fetch_table_df
+from src.ai.block_generator import CandidateBlockGenerator
+from src.ai.features import FEATURE_COLUMNS, extract_cluster_features
+from src.simulation.generate_data import run_continuous_simulation
 
 DATA_DIR = ROOT_DIR / "data" / "raw"
 OUTPUT_PATH = DATA_DIR / "train_features.csv"
 
-FEATURE_COLUMNS = ["amount_diff", "time_delta_hours", "utr_fuzz_ratio"]
 
+def generate_training_samples(num_simulation_seeds: int = 4, days: int = 3) -> pd.DataFrame:
+    all_positive_rows = []
+    all_negative_rows = []
+    block_gen = CandidateBlockGenerator(max_delay_days=5, max_amount_diff_pct=0.25)
 
-def _safe_ratio(left_value, right_value) -> float:
-    left_text = "" if pd.isna(left_value) else str(left_value)
-    right_text = "" if pd.isna(right_value) else str(right_value)
-    return float(fuzz.ratio(left_text, right_text))
+    for seed in range(100, 100 + num_simulation_seeds):
+        df_erp, df_gw, df_bank, df_eg, df_gb = run_continuous_simulation(days=days, seed=seed)
 
+        gw_dict = {row["payment_id"]: row.to_dict() for _, row in df_gw.iterrows()}
+        bank_dict = {row["bank_entry_id"]: row.to_dict() for _, row in df_bank.iterrows()}
 
-def build_residual_dataset(db_path: Path = DB_PATH, output_path: Path = OUTPUT_PATH) -> pd.DataFrame:
-    gw_df = fetch_table_df("gateway_settlements", db_path)
-    bank_df = fetch_table_df("bank_statement", db_path)
-    true_df = fetch_table_df("gw_bank_true", db_path)
-    pred_df = fetch_table_df("gw_bank_pred", db_path)
+        # Build true ground truth mapping: bank_id -> frozenset(gw_ids)
+        true_gws_by_bank = defaultdict(set)
+        for _, row in df_gb.iterrows():
+            gw_id = str(row["gw_id"])
+            bank_id = str(row["bank_id"])
+            true_gws_by_bank[bank_id].add(gw_id)
 
-    if gw_df.empty or bank_df.empty:
-        raise ValueError("Gateway or bank tables are empty; run the deterministic baseline first.")
+        # 1. Positives (Label = 1)
+        for bank_id, true_gw_ids in true_gws_by_bank.items():
+            if bank_id not in bank_dict:
+                continue
+            gw_rows = [gw_dict[g_id] for g_id in true_gw_ids if g_id in gw_dict]
+            if len(gw_rows) == len(true_gw_ids):
+                feats = extract_cluster_features(gw_rows, bank_dict[bank_id])
+                feats["label"] = 1
+                feats["bank_id"] = bank_id
+                feats["cluster_gw_ids"] = ",".join(sorted(true_gw_ids))
+                all_positive_rows.append(feats)
 
-    predicted_gateway_ids = set(pred_df["gateway_payment_id"].astype(str).dropna()) if not pred_df.empty else set()
-    predicted_bank_ids = set(pred_df["bank_entry_id"].astype(str).dropna()) if not pred_df.empty else set()
+        # 2. Hard Negatives (Label = 0 via candidate block generator)
+        unmatched_gws = [r.to_dict() for _, r in df_gw.iterrows()]
+        unmatched_banks = [r.to_dict() for _, r in df_bank.iterrows()]
+        candidate_blocks = block_gen.generate_blocks(unmatched_gws, unmatched_banks)
 
-    orphan_gw = gw_df.loc[~gw_df["payment_id"].astype(str).isin(predicted_gateway_ids), ["payment_id", "net_settled", "settled_at", "bank_utr"]].copy()
-    orphan_bank = bank_df.loc[~bank_df["bank_entry_id"].astype(str).isin(predicted_bank_ids), ["bank_entry_id", "credit_amount", "value_date", "remittance_info"]].copy()
+        for block in candidate_blocks:
+            b_id = block["bank_id"]
+            cand_gw_set = set(block["gw_ids"])
+            true_gw_set = true_gws_by_bank.get(b_id, set())
 
-    if orphan_gw.empty or orphan_bank.empty:
-        raise ValueError("No orphaned Gateway/Bank records remain after filtering resolved matches.")
+            # If the candidate block does NOT exactly match the true ground truth set, it is a negative
+            if cand_gw_set != true_gw_set:
+                feats = extract_cluster_features(block["gw_rows"], block["bank_row"])
+                feats["label"] = 0
+                feats["bank_id"] = b_id
+                feats["cluster_gw_ids"] = ",".join(sorted(block["gw_ids"]))
+                all_negative_rows.append(feats)
 
-    orphan_gw = orphan_gw.rename(columns={"payment_id": "gateway_payment_id"})
-    orphan_bank = orphan_bank.rename(columns={"bank_entry_id": "bank_entry_id"})
+    df_pos = pd.DataFrame(all_positive_rows)
+    df_neg = pd.DataFrame(all_negative_rows)
 
-    true_pairs = true_df[["gw_id", "bank_id"]].rename(columns={"gw_id": "gateway_payment_id", "bank_id": "bank_entry_id"}).copy()
-    true_pair_keys = set(zip(true_pairs["gateway_payment_id"].astype(str), true_pairs["bank_entry_id"].astype(str)))
+    if df_pos.empty:
+        raise ValueError("No positive cluster samples generated.")
 
-    positive = (
-        true_pairs.merge(orphan_gw, on="gateway_payment_id", how="inner")
-        .merge(orphan_bank, on="bank_entry_id", how="inner")
-        .copy()
-    )
+    # Balance negatives: ratio 3:1
+    target_neg = min(len(df_neg), max(1, 3 * len(df_pos)))
+    if len(df_neg) > target_neg:
+        df_neg = df_neg.sample(n=target_neg, random_state=42).reset_index(drop=True)
 
-    if positive.empty:
-        raise ValueError("No positive residual pairs were found in the ground-truth data for this run.")
+    df_all = pd.concat([df_pos, df_neg], ignore_index=True)
+    df_all = df_all.sample(frac=1.0, random_state=42).reset_index(drop=True)
 
-    positive["gw_settled_at"] = pd.to_datetime(positive["settled_at"], errors="coerce")
-    positive["bank_value_date"] = pd.to_datetime(positive["value_date"], errors="coerce")
-    positive["amount_diff"] = (positive["net_settled"] - positive["credit_amount"]).abs()
-    positive["time_delta_hours"] = (positive["bank_value_date"] - positive["gw_settled_at"]).dt.total_seconds() / 3600.0
-    positive["utr_fuzz_ratio"] = positive.apply(
-        lambda row: _safe_ratio(row.get("bank_utr"), row.get("remittance_info")),
-        axis=1,
-    )
-    positive["label"] = 1
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    df_all.to_csv(OUTPUT_PATH, index=False)
 
-    gw_candidates = orphan_gw.copy()
-    bank_candidates = orphan_bank.copy()
-    negative = gw_candidates.merge(bank_candidates, how="cross").copy()
-    negative["gw_settled_at"] = pd.to_datetime(negative["settled_at"], errors="coerce")
-    negative["bank_value_date"] = pd.to_datetime(negative["value_date"], errors="coerce")
-    negative = negative[
-        negative["gw_settled_at"].notna()
-        & negative["bank_value_date"].notna()
-        & (negative["bank_value_date"] >= negative["gw_settled_at"])
-        & (negative["bank_value_date"] <= negative["gw_settled_at"] + pd.Timedelta(days=3))
-    ].copy()
-
-    negative["pair_key"] = list(zip(negative["gateway_payment_id"].astype(str), negative["bank_entry_id"].astype(str)))
-    negative = negative[~negative["pair_key"].isin(true_pair_keys)].copy()
-
-    if negative.empty:
-        raise ValueError("No valid negative residual candidates remain after filtering by the 3-day window.")
-
-    negative["amount_diff"] = (negative["net_settled"] - negative["credit_amount"]).abs()
-    negative["time_delta_hours"] = (negative["bank_value_date"] - negative["gw_settled_at"]).dt.total_seconds() / 3600.0
-    negative["utr_fuzz_ratio"] = negative.apply(
-        lambda row: _safe_ratio(row.get("bank_utr"), row.get("remittance_info")),
-        axis=1,
-    )
-    negative["label"] = 0
-
-    target_negatives = max(3 * len(positive), 1)
-    if len(negative) > target_negatives:
-        negative = negative.sample(n=target_negatives, random_state=42).reset_index(drop=True)
-
-    dataset = pd.concat([positive, negative], ignore_index=True, sort=False)
-    dataset = dataset[["gateway_payment_id", "bank_entry_id", *FEATURE_COLUMNS, "label"]].copy()
-    dataset[FEATURE_COLUMNS] = dataset[FEATURE_COLUMNS].astype(float)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    dataset.to_csv(output_path, index=False)
-
-    print(f"[✔] Residual dataset saved to: {output_path}")
-    print(f"    - Positive samples: {len(positive)}")
-    print(f"    - Negative samples: {len(negative)}")
-    return dataset
+    print(f"[✔] Cluster training dataset saved to: {OUTPUT_PATH}")
+    print(f"    - Total samples: {len(df_all)}")
+    print(f"    - Positive clusters (1): {len(df_pos)}")
+    print(f"    - Hard Negative clusters (0): {len(df_neg)}")
+    return df_all
 
 
 def main():
-    build_residual_dataset()
+    generate_training_samples()
 
 
 if __name__ == "__main__":
