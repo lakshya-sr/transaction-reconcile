@@ -8,19 +8,18 @@ failed to find complete connections in the graph-based reconciliation engine.
 
 import sys
 from pathlib import Path
-
 import pandas as pd
 from tabulate import tabulate
 
-# Add project root to sys.path
-BASE_DIR = Path(__file__).resolve().parent
-if str(BASE_DIR) not in sys.path:
-    sys.path.insert(0, str(BASE_DIR))
-
-from src.config import (
-    DB_PATH, TABLE_ERP, TABLE_GATEWAY, TABLE_BANK
+from src.core.config import (
+    DB_PATH,
+    TABLE_ERP,
+    TABLE_GATEWAY,
+    TABLE_BANK,
+    TABLE_ERP_GW_PRED,
+    TABLE_GW_BANK_PRED,
 )
-from src.database import get_connection
+from src.core.database import get_connection
 
 
 def truncate_text(text, max_len=40):
@@ -38,10 +37,10 @@ def main():
     
     # 2. Load Graph Edges
     try:
-        df_eg_edges = pd.read_sql_query("SELECT erp_order_id, gateway_payment_id FROM erp_to_gateway_edges", conn)
-        df_gb_edges = pd.read_sql_query("SELECT gateway_payment_id, bank_entry_id FROM gateway_to_bank_edges", conn)
+        df_eg_edges = pd.read_sql_query(f"SELECT erp_order_id, gateway_payment_id FROM {TABLE_ERP_GW_PRED}", conn)
+        df_gb_edges = pd.read_sql_query(f"SELECT gateway_payment_id, bank_entry_id FROM {TABLE_GW_BANK_PRED}", conn)
     except Exception as e:
-        print("[!] Could not read edge tables. Have you run Phase 3 exact matching yet?")
+        print("[!] Could not read edge tables. Have you run Phase 3 matching yet?")
         conn.close()
         return
         

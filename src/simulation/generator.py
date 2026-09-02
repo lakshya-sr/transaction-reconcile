@@ -26,7 +26,7 @@ from typing import Dict, List, Tuple
 
 from faker import Faker
 
-from src.config import (
+from src.core.config import (
     BANK_STATEMENT_PATH,
     DATA_DIR,
     ERP_LEDGER_PATH,
