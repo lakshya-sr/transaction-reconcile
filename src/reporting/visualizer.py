@@ -391,6 +391,7 @@ def render_graph_html(
     output_file: Path,
     heading_title: str = "Reconciliation Graph",
     show_accuracy_legend: bool = False,
+    custom_edge_legend: Optional[str] = None,
 ) -> Path:
     """Renders the graph into an interactive self-contained HTML page with a side panel."""
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -428,8 +429,10 @@ def render_graph_html(
     with open(output_file, "r", encoding="utf-8") as f:
         html_content = f.read()
 
-    # Build edge legend — accuracy mode vs ground truth mode
-    if show_accuracy_legend:
+    # Build edge legend
+    if custom_edge_legend:
+        edge_legend = custom_edge_legend
+    elif show_accuracy_legend:
         edge_legend = (
             "<span style='color:#00E676;'>─── Correct Prediction (TP)</span> &nbsp;"
             "<span style='color:#EA4335;'>─── False Positive (FP)</span>"

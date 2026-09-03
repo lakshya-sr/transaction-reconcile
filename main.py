@@ -24,6 +24,7 @@ try:
     from src.core import db_setup
     from src.deterministic import exact_matcher
     from src.ai import inference as ai_inference
+    from src.ai import erp_gw_inference as erp_gw_ai_inference
     from src.reporting import evaluate
     from src.reporting import reconciled_records
     from src.reporting import all_records_visualizer
@@ -45,6 +46,8 @@ def main():
     parser.add_argument("--setup-db", "-d", action="store_true", help="Phase 2: Initialize SQLite DB and ingest raw data")
     parser.add_argument("--match", "-m", action="store_true", help="Phase 3: Run the deterministic + fuzzy + cluster-XGBoost matching engine")
     parser.add_argument("--infer", "-i", action="store_true", help="Phase 4: Run the residual XGBoost inference pass on unmatched Gateway↔Bank pairs after the fuzzy residual layer")
+    parser.add_argument("--build-erp-gw-dataset", action="store_true", help="AI Training: Generate ERP↔GW XGBoost training dataset from simulation")
+    parser.add_argument("--train-erp-gw", action="store_true", help="AI Training: Train the ERP↔GW XGBoost classifier and export artifacts")
 
     # Diagnostics & Reporting
     parser.add_argument("--evaluate", "-e", action="store_true", help="Phase 5: Run strict ID graph accuracy evaluator")
@@ -107,11 +110,17 @@ def main():
             print("[✔] Phase 3 Completed: Deterministic matching finished.")
 
     if (args.all or args.infer) and not args.deterministic_only:
-        print_banner("PHASE 4: RESIDUAL XGBOOST INFERENCE")
+        print_banner("PHASE 4a: RESIDUAL XGBOOST INFERENCE (GW↔Bank)")
         with suppress_stdout(suppress_internal):
             ai_inference.main()
         if not is_quiet and not is_verbose:
-            print("[✔] Phase 4 Completed: Residual AI cluster matching finished.")
+            print("[✔] Phase 4a Completed: GW↔Bank residual AI cluster matching finished.")
+
+        print_banner("PHASE 4b: RESIDUAL XGBOOST INFERENCE (ERP↔Gateway)")
+        with suppress_stdout(suppress_internal):
+            erp_gw_ai_inference.main()
+        if not is_quiet and not is_verbose:
+            print("[✔] Phase 4b Completed: ERP↔GW residual AI cluster matching finished.")
 
     if args.all or args.evaluate:
         print_banner("PHASE 5: EVALUATION METRICS")
@@ -138,6 +147,17 @@ def main():
     if args.unmatched:
         print_banner("DIAGNOSTIC: UNMATCHED RECORDS")
         show_unreconciled_records.main()
+
+
+    if args.build_erp_gw_dataset:
+        print_banner("ERP↔GW AI: GENERATING TRAINING DATASET")
+        from src.ai import erp_gw_dataset_builder
+        erp_gw_dataset_builder.main()
+
+    if args.train_erp_gw:
+        print_banner("ERP↔GW AI: TRAINING XGBOOST MODEL")
+        from src.ai import erp_gw_train_model
+        erp_gw_train_model.main()
 
     if args.dashboard:
         print_banner("LAUNCHING STREAMLIT RECONCILIATION DASHBOARD")

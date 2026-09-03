@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Phase 3 & 4: Exact + Fuzzy Matching Engine Module with Graph Edge Assembly.
-Includes full complex tracking and subset sum matching optimizations.
+Includes full complex tracking, subset sum matching for both Gateway->Bank and ERP->Gateway layers.
 """
 
 import ast
@@ -29,6 +29,8 @@ from src.core.config import (
     TABLE_GW_BANK_PRED,
 )
 from src.core.database import get_connection, clear_graph_edges, save_graph_edges
+
+STAGE_T3_SUBSET_SUM_SPLIT = "T3_Subset_Sum_Split"
 
 def extract_invoice_number(remittance_info: str) -> Optional[str]:
     if not remittance_info or not isinstance(remittance_info, str): return None
@@ -186,44 +188,6 @@ class ReconciliationEngine:
                             "note": f"Tier 1: Bank UTR match ({utr})."
                         }
 
-        unmatched_gws = [r for r in self.gw_records if r["payment_id"] not in self.gw_linked_to_bank]
-        unmatched_banks = [r for r in self.bank_records if r["bank_entry_id"] not in self.matched_bank_entries]
-
-        rem_by_setl = {}
-        for g in unmatched_gws:
-            setl = g.get("settlement_id")
-            if setl:
-                rem_by_setl.setdefault(setl, []).append(g)
-
-        for setl_id, g_rows in rem_by_setl.items():
-            sum_gw = round(sum(float(r["net_settled"]) for r in g_rows), 2)
-            all_invoices = set()
-            for g in g_rows:
-                for inv in parse_invoices(g.get("invoices")):
-                    all_invoices.add(inv)
-
-            for b in unmatched_banks:
-                b_id = b["bank_entry_id"]
-                if b_id in self.matched_bank_entries:
-                    continue
-                bank_credit = round(float(b["credit_amount"]), 2)
-                if abs(sum_gw - bank_credit) < 0.01:
-                    remittance = str(b.get("remittance_info", ""))
-                    if any(inv in remittance or inv.replace("INV-", "") in remittance for inv in all_invoices if inv):
-                        self.matched_bank_entries.add(b_id)
-                        for g in g_rows:
-                            gw_pid = g["payment_id"]
-                            self.gw_linked_to_bank.add(gw_pid)
-                            self.gw_bank_links[gw_pid] = {
-                                "bank_ids": [b_id],
-                                "utr": g.get("bank_utr"),
-                                "match_type": MATCH_TYPE_BULK if len(g_rows) > 1 else MATCH_TYPE_EXACT,
-                                "matching_stage": STAGE_T1_IDENTIFIER,
-                                "score": 1.00,
-                                "note": f"Tier 1: Batch invoice cross-ref match."
-                            }
-                        break
-
     def match_exact_gateway_to_bank(self):
         self.match_tier1_identifier_clusters_gateway_to_bank()
 
@@ -235,7 +199,6 @@ class ReconciliationEngine:
 
         unmatched_banks.sort(key=lambda x: str(x.get("value_date", "")))
 
-        # Pre-parse timestamps and integer cents
         gw_pool = []
         for gw in unmatched_gws:
             settled_str = str(gw.get("settled_at", ""))[:10]
@@ -293,7 +256,6 @@ class ReconciliationEngine:
                 if rem_target <= 0:
                     continue
 
-                # Candidate nearby: same settlement date or within 12h, cents <= rem_target
                 nearby_gws = [
                     (dt, gw, cents) for dt, gw, cents, _, _ in valid_gws
                     if abs((dt - a_dt).total_seconds()) <= 43200
@@ -325,7 +287,6 @@ class ReconciliationEngine:
                 if found_subsets:
                     break
 
-            # Tier 4: Select unique confirmed subset with narrative validation
             selected_subset = found_subsets[0] if len(found_subsets) == 1 else None
 
             if selected_subset:
@@ -390,11 +351,147 @@ class ReconciliationEngine:
                             for e in erp_nodes:
                                 self.erp_gw_stage_map.setdefault(g, {})[e] = STAGE_EXACT_ERP_GW
 
+    def match_tier2_erp_to_gw_many_to_one(self):
+        """N:1 Bundled Cart: Group multiple unmatched ERP orders that sum to an unmatched Gateway gross amount (within ±1 hour)."""
+        unmatched_erps = [r for r in self.erp_records if r["erp_entry_id"] not in self.matched_erp_entries]
+        unmatched_gws = [r for r in self.gw_records if r["payment_id"] not in self.gw_linked_to_erp]
+
+        if not unmatched_erps or not unmatched_gws:
+            return
+
+        erp_pool = []
+        for e in unmatched_erps:
+            try:
+                dt = datetime.strptime(str(e.get("entry_date", ""))[:19], "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                try:
+                    dt = datetime.strptime(str(e.get("entry_date", ""))[:10], "%Y-%m-%d")
+                except Exception:
+                    continue
+            cents = int(round(float(e.get("gross_amount", 0.0)) * 100))
+            erp_pool.append((dt, e, cents))
+
+        for gw in unmatched_gws:
+            gw_id = gw["payment_id"]
+            if gw_id in self.gw_linked_to_erp:
+                continue
+            try:
+                gw_dt = datetime.strptime(str(gw.get("settled_at", ""))[:19], "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                try:
+                    gw_dt = datetime.strptime(str(gw.get("settled_at", ""))[:10], "%Y-%m-%d")
+                except Exception:
+                    continue
+            target_cents = int(round(float(gw.get("gross_amount", 0.0)) * 100))
+
+            window_start = gw_dt - timedelta(hours=1)
+            window_end = gw_dt + timedelta(hours=1)
+
+            valid_erps = [
+                (dt, e, cents) for dt, e, cents in erp_pool
+                if window_start <= dt <= window_end and e["erp_entry_id"] not in self.matched_erp_entries
+            ]
+            if not valid_erps:
+                continue
+
+            valid_erps.sort(key=lambda x: x[2], reverse=True)
+
+            sum_map = {0: []}
+            found = False
+            for _, e, cents in valid_erps:
+                for current_sum, path in list(sum_map.items()):
+                    candidate_sum = current_sum + cents
+                    if candidate_sum > target_cents:
+                        continue
+                    if candidate_sum not in sum_map:
+                        sum_map[candidate_sum] = path + [e["erp_entry_id"]]
+                    if candidate_sum == target_cents:
+                        found = True
+                        break
+                if found:
+                    break
+
+            if target_cents in sum_map and len(sum_map[target_cents]) > 1:
+                erp_ids = sum_map[target_cents]
+                self.gw_linked_to_erp.add(gw_id)
+                for e_id in erp_ids:
+                    self.matched_erp_entries.add(e_id)
+                self.gw_to_erp_links.setdefault(gw_id, []).extend(erp_ids)
+                for e_id in erp_ids:
+                    self.erp_gw_stage_map.setdefault(gw_id, {})[e_id] = STAGE_T2_SUBSET_SUM
+
+    def match_tier3_erp_to_gw_one_to_many(self):
+        """1:N Reserve Split: Group multiple unmatched Gateway payouts that sum to an unmatched ERP gross amount (within ±1 hour)."""
+        unmatched_erps = [r for r in self.erp_records if r["erp_entry_id"] not in self.matched_erp_entries]
+        unmatched_gws = [r for r in self.gw_records if r["payment_id"] not in self.gw_linked_to_erp]
+
+        if not unmatched_erps or not unmatched_gws:
+            return
+
+        gw_pool = []
+        for gw in unmatched_gws:
+            try:
+                dt = datetime.strptime(str(gw.get("settled_at", ""))[:19], "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                try:
+                    dt = datetime.strptime(str(gw.get("settled_at", ""))[:10], "%Y-%m-%d")
+                except Exception:
+                    continue
+            cents = int(round(float(gw.get("gross_amount", 0.0)) * 100))
+            gw_pool.append((dt, gw, cents))
+
+        for erp in unmatched_erps:
+            erp_id = erp["erp_entry_id"]
+            if erp_id in self.matched_erp_entries:
+                continue
+            try:
+                erp_dt = datetime.strptime(str(erp.get("entry_date", ""))[:19], "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                try:
+                    erp_dt = datetime.strptime(str(erp.get("entry_date", ""))[:10], "%Y-%m-%d")
+                except Exception:
+                    continue
+            target_cents = int(round(float(erp.get("gross_amount", 0.0)) * 100))
+
+            window_start = erp_dt - timedelta(hours=1)
+            window_end = erp_dt + timedelta(hours=1)
+
+            valid_gws = [
+                (dt, gw, cents) for dt, gw, cents in gw_pool
+                if window_start <= dt <= window_end and gw["payment_id"] not in self.gw_linked_to_erp
+            ]
+            if not valid_gws:
+                continue
+
+            valid_gws.sort(key=lambda x: x[2], reverse=True)
+
+            sum_map = {0: []}
+            found = False
+            for _, gw, cents in valid_gws:
+                for current_sum, path in list(sum_map.items()):
+                    candidate_sum = current_sum + cents
+                    if candidate_sum > target_cents:
+                        continue
+                    if candidate_sum not in sum_map:
+                        sum_map[candidate_sum] = path + [gw["payment_id"]]
+                    if candidate_sum == target_cents:
+                        found = True
+                        break
+                if found:
+                    break
+
+            if target_cents in sum_map and len(sum_map[target_cents]) > 1:
+                gw_ids = sum_map[target_cents]
+                self.matched_erp_entries.add(erp_id)
+                for gw_id in gw_ids:
+                    self.gw_linked_to_erp.add(gw_id)
+                    self.gw_to_erp_links.setdefault(gw_id, []).append(erp_id)
+                    self.erp_gw_stage_map.setdefault(gw_id, {})[erp_id] = STAGE_T3_SUBSET_SUM_SPLIT
+
     def match_fuzzy_gateway_to_bank(self):
         unmatched_gws = [r for r in self.gw_records if r["payment_id"] not in self.gw_linked_to_bank]
         unmatched_banks = [r for r in self.bank_records if r["bank_entry_id"] not in self.matched_bank_entries]
 
-        # Fast amount grouping
         bank_by_amt = {}
         for b in unmatched_banks:
             amt = round(float(b["credit_amount"]), 2)
@@ -510,8 +607,10 @@ class ReconciliationEngine:
                 })
 
     def run(self, deterministic_only: bool = True):
-        self.match_exact_gateway_to_bank()
         self.match_exact_erp_to_gateway()
+        self.match_tier2_erp_to_gw_many_to_one()
+        self.match_tier3_erp_to_gw_one_to_many()
+        self.match_exact_gateway_to_bank()
         self.match_combinatorial_gateway_to_bank()
         if not deterministic_only:
             self.match_fuzzy_gateway_to_bank()

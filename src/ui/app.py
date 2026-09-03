@@ -18,6 +18,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from pyvis.network import Network
+import networkx as nx
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -155,12 +156,33 @@ def compute_kpis(data: Dict[str, pd.DataFrame]) -> Dict:
     }
 
 
-def build_pyvis_network(data: Dict[str, pd.DataFrame], max_components: int = 40) -> Network:
+from src.reporting.visualizer import (
+    build_graph,
+    compute_grid_layout,
+    render_graph_html,
+    get_erp_html,
+    get_gw_html,
+    get_bnk_html,
+    COLOR_ERP,
+    COLOR_GW,
+    COLOR_BNK,
+)
+
+# Visual Constants for Deterministic vs AI
+COLOR_DETERMINISTIC_EDGE = "#9E9E9E"  # Solid Grey
+COLOR_AI_EDGE = "#9C27B0"             # Dashed Bright Purple
+
+
+def build_pyvis_network_from_visualizer(
+    data: Dict[str, pd.DataFrame],
+    max_components: int = 45,
+    heading_title: str = "Reconciliation Graph Network",
+) -> Path:
     """
-    Constructs an interactive PyVis network.
-    - Nodes: ERP (Blue), Gateway (Orange), Bank (Green)
-    - Edges: Solid Grey for Deterministic, Dashed Bright Purple for AI/Fuzzy
-    - Solver: barnesHut physics for clean N:1 batch fan-out
+    Reuses the graph construction and 3-column grid layout from src.reporting.visualizer.
+    Applies the required edge differentiation:
+      - Solid Thick Grey line (#9E9E9E) for Deterministic (Exact/Bulk/SubsetSum)
+      - Dashed Bright Purple line (#9C27B0) for AI / Probabilistic (XGBoost/Fuzzy)
     """
     df_erp = data.get("erp", pd.DataFrame())
     df_gw = data.get("gw", pd.DataFrame())
@@ -168,192 +190,162 @@ def build_pyvis_network(data: Dict[str, pd.DataFrame], max_components: int = 40)
     df_peg = data.get("pred_eg", pd.DataFrame())
     df_pgb = data.get("pred_gb", pd.DataFrame())
 
-    net = Network(height="700px", width="100%", bgcolor="#FFFFFF", font_color="#212121", directed=False)
+    G = nx.Graph()
 
-    # Dictionaries for quick property lookup
-    erp_dict = {r["erp_entry_id"]: r for r in df_erp.to_dict("records")} if not df_erp.empty else {}
-    gw_dict = {r["payment_id"]: r for r in df_gw.to_dict("records")} if not df_gw.empty else {}
-    bank_dict = {r["bank_entry_id"]: r for r in df_bank.to_dict("records")} if not df_bank.empty else {}
+    erp_dict = df_erp.set_index("erp_entry_id").to_dict("index") if not df_erp.empty else {}
+    gw_dict = df_gw.set_index("payment_id").to_dict("index") if not df_gw.empty else {}
+    bnk_dict = df_bank.set_index("bank_entry_id").to_dict("index") if not df_bank.empty else {}
 
-    # Identify active matched nodes
-    active_erp = set(df_peg["erp_order_id"].dropna()) if not df_peg.empty else set()
-    active_gw = set(df_peg["gateway_payment_id"].dropna()) | (set(df_pgb["gateway_payment_id"].dropna()) if not df_pgb.empty else set())
+    # Filter to top components if graph is large
     active_bank = set(df_pgb["bank_entry_id"].dropna()) if not df_pgb.empty else set()
-
-    # Limit to max_components to keep rendering smooth if graph is large
     if max_components and len(active_bank) > max_components:
         selected_banks = set(list(active_bank)[:max_components])
         df_pgb_sub = df_pgb[df_pgb["bank_entry_id"].isin(selected_banks)]
         selected_gws = set(df_pgb_sub["gateway_payment_id"].dropna())
         df_peg_sub = df_peg[df_peg["gateway_payment_id"].isin(selected_gws)]
-        selected_erps = set(df_peg_sub["erp_order_id"].dropna())
     else:
         df_peg_sub = df_peg
         df_pgb_sub = df_pgb
-        selected_banks = active_bank
-        selected_gws = active_gw
-        selected_erps = active_erp
 
-    added_nodes = set()
-
-    # 1. Add ERP Nodes (Blue #1E88E5)
-    for erp_id in selected_erps:
-        r = erp_dict.get(erp_id, {})
-        amt = r.get("gross_amount", 0.0)
-        inv = r.get("invoice_number", "N/A")
-        cust = r.get("customer_name", "N/A")
-        dt = str(r.get("created_at", ""))[:10]
-        tooltip = f"""
-        <div style='font-family:sans-serif; padding:6px;'>
-            <b style='color:#1E88E5;'>[ERP Ledger Order]</b><br>
-            <b>ID:</b> {erp_id}<br>
-            <b>Invoice:</b> {inv}<br>
-            <b>Gross:</b> ₹{amt:,.2f}<br>
-            <b>Customer:</b> {cust}<br>
-            <b>Date:</b> {dt}
-        </div>
-        """
-        net.add_node(
-            erp_id,
-            label=f"{inv}\n₹{amt:,.0f}",
-            title=tooltip,
-            color="#1E88E5",
-            shape="box",
-            size=18,
-            font={"color": "#FFFFFF", "size": 11, "face": "Helvetica"},
-        )
-        added_nodes.add(erp_id)
-
-    # 2. Add Gateway Nodes (Orange #FB8C00)
-    for gw_id in selected_gws:
-        r = gw_dict.get(gw_id, {})
-        gross = r.get("gross_amount", 0.0)
-        net_amt = r.get("net_settled", 0.0)
-        fee = r.get("fee_amount", 0.0)
-        utr = r.get("bank_utr", "N/A")
-        s_dt = str(r.get("settled_at", ""))[:10]
-        tooltip = f"""
-        <div style='font-family:sans-serif; padding:6px;'>
-            <b style='color:#FB8C00;'>[Gateway Settlement]</b><br>
-            <b>ID:</b> {gw_id}<br>
-            <b>Gross:</b> ₹{gross:,.2f} | <b>Net:</b> ₹{net_amt:,.2f}<br>
-            <b>MDR Fee:</b> ₹{fee:,.2f}<br>
-            <b>UTR:</b> {utr}<br>
-            <b>Settled:</b> {s_dt}
-        </div>
-        """
-        short_id = gw_id.replace("GW-", "")[:6]
-        net.add_node(
-            gw_id,
-            label=f"GW:{short_id}\n₹{net_amt:,.0f}",
-            title=tooltip,
-            color="#FB8C00",
-            shape="box",
-            size=18,
-            font={"color": "#FFFFFF", "size": 11, "face": "Helvetica"},
-        )
-        added_nodes.add(gw_id)
-
-    # 3. Add Bank Nodes (Green #43A047)
-    for bank_id in selected_banks:
-        r = bank_dict.get(bank_id, {})
-        credit = r.get("credit_amount", 0.0)
-        rem = str(r.get("remittance_info", "N/A"))
-        v_dt = str(r.get("value_date", ""))[:10]
-        tooltip = f"""
-        <div style='font-family:sans-serif; padding:6px;'>
-            <b style='color:#43A047;'>[Bank Statement Deposit]</b><br>
-            <b>ID:</b> {bank_id}<br>
-            <b>Credit Amount:</b> ₹{credit:,.2f}<br>
-            <b>Value Date:</b> {v_dt}<br>
-            <b>Remittance:</b> {rem}
-        </div>
-        """
-        short_b = bank_id.replace("BNK-", "")[:8]
-        net.add_node(
-            bank_id,
-            label=f"BNK:{short_b}\n₹{credit:,.0f}",
-            title=tooltip,
-            color="#43A047",
-            shape="ellipse",
-            size=24,
-            font={"color": "#FFFFFF", "size": 12, "face": "Helvetica"},
-        )
-        added_nodes.add(bank_id)
-
-    # 4. Add ERP <-> Gateway Edges
+    # 1. ERP <-> Gateway Edges
     if not df_peg_sub.empty:
         for _, row in df_peg_sub.iterrows():
             e_id = row["erp_order_id"]
             g_id = row["gateway_payment_id"]
-            if e_id in added_nodes and g_id in added_nodes:
-                stage = str(row.get("matching_stage", "Unknown"))
-                m_type = str(row.get("match_type", "Exact"))
-                score = float(row.get("confidence_score", 1.0))
-                amt = float(row.get("allocated_amount", 0.0))
+            amt = float(row.get("allocated_amount", 0.0))
+            stage = str(row.get("matching_stage", "Unknown"))
+            m_type = str(row.get("match_type", "Exact"))
+            score = float(row.get("confidence_score", 1.0))
+            notes = str(row.get("notes", ""))
 
-                is_ai = ("AI" in stage or "Fuzzy" in stage or "Fuzzy" in m_type)
-                edge_color = "#9C27B0" if is_ai else "#9E9E9E"
-                edge_dashes = True if is_ai else False
+            is_ai = ("AI" in stage or "Fuzzy" in stage or "Fuzzy" in m_type)
+            edge_color = COLOR_AI_EDGE if is_ai else COLOR_DETERMINISTIC_EDGE
+            edge_label_tag = "🤖 AI Probabilistic" if is_ai else "⚙️ Deterministic"
 
-                tooltip = f"<b>Stage:</b> {stage}<br><b>Type:</b> {m_type}<br><b>Confidence:</b> {score:.4f}<br><b>Allocated:</b> ₹{amt:,.2f}"
-                net.add_edge(
+            if not G.has_node(e_id):
+                row_data = erp_dict.get(e_id, {})
+                label = e_id.split("-")[-1] if "-" in e_id else e_id
+                G.add_node(
                     e_id,
-                    g_id,
-                    title=tooltip,
-                    color=edge_color,
-                    dashes=edge_dashes,
-                    width=3.0 if is_ai else 2.5,
+                    group=1,
+                    color=COLOR_ERP,
+                    title=get_erp_html(e_id, row_data, is_matched=True),
+                    label=label,
+                    size=20,
                 )
 
-    # 5. Add Gateway <-> Bank Edges
+            if not G.has_node(g_id):
+                row_data = gw_dict.get(g_id, {})
+                label = g_id.split("-")[-1] if "-" in g_id else g_id
+                G.add_node(
+                    g_id,
+                    group=2,
+                    color=COLOR_GW,
+                    title=get_gw_html(g_id, row_data, is_matched=True),
+                    label=label,
+                    size=20,
+                )
+
+            tooltip = (
+                f"<b>{edge_label_tag} Edge (ERP ↔ Gateway)</b><br>"
+                f"<b>Allocated Amount:</b> ₹{amt:,.2f}<br>"
+                f"<b>Matching Stage:</b> {stage}<br>"
+                f"<b>Match Type:</b> {m_type}<br>"
+                f"<b>Confidence Score:</b> {score:.4f}<br>"
+                f"<b>Audit Notes:</b> {notes}"
+            )
+            G.add_edge(
+                e_id,
+                g_id,
+                title=tooltip,
+                color=edge_color,
+                dashes=is_ai,
+                width=2.5,
+            )
+
+    # 2. Gateway <-> Bank Edges
     if not df_pgb_sub.empty:
         for _, row in df_pgb_sub.iterrows():
             g_id = row["gateway_payment_id"]
             b_id = row["bank_entry_id"]
-            if g_id in added_nodes and b_id in added_nodes:
-                stage = str(row.get("matching_stage", "Unknown"))
-                m_type = str(row.get("match_type", "Exact"))
-                score = float(row.get("confidence_score", 1.0))
-                amt = float(row.get("allocated_amount", 0.0))
+            amt = float(row.get("allocated_amount", 0.0))
+            stage = str(row.get("matching_stage", "Unknown"))
+            m_type = str(row.get("match_type", "Exact"))
+            score = float(row.get("confidence_score", 1.0))
+            notes = str(row.get("notes", ""))
 
-                is_ai = ("AI" in stage or "Fuzzy" in stage or "Fuzzy" in m_type)
-                edge_color = "#9C27B0" if is_ai else "#9E9E9E"
-                edge_dashes = True if is_ai else False
+            is_ai = ("AI" in stage or "Fuzzy" in stage or "Fuzzy" in m_type)
+            edge_color = COLOR_AI_EDGE if is_ai else COLOR_DETERMINISTIC_EDGE
+            edge_label_tag = "🤖 AI Probabilistic" if is_ai else "⚙️ Deterministic"
 
-                tooltip = f"<b>Stage:</b> {stage}<br><b>Type:</b> {m_type}<br><b>Confidence:</b> {score:.4f}<br><b>Allocated:</b> ₹{amt:,.2f}"
-                net.add_edge(
+            if not G.has_node(g_id):
+                row_data = gw_dict.get(g_id, {})
+                label = g_id.split("-")[-1] if "-" in g_id else g_id
+                G.add_node(
                     g_id,
-                    b_id,
-                    title=tooltip,
-                    color=edge_color,
-                    dashes=edge_dashes,
-                    width=3.5 if is_ai else 2.5,
+                    group=2,
+                    color=COLOR_GW,
+                    title=get_gw_html(g_id, row_data, is_matched=True),
+                    label=label,
+                    size=20,
                 )
 
-    # Physics Solver Configuration: barnesHut for clean N:1 batch fan-outs
-    options = {
-        "physics": {
-            "barnesHut": {
-                "gravitationalConstant": -12000,
-                "centralGravity": 0.35,
-                "springLength": 130,
-                "springConstant": 0.04,
-                "damping": 0.15,
-                "avoidOverlap": 0.45,
-            },
-            "minVelocity": 0.75,
-            "solver": "barnesHut",
-        },
-        "interaction": {
-            "hover": True,
-            "tooltipDelay": 80,
-            "navigationButtons": True,
-            "zoomView": True,
-        },
-    }
-    net.set_options(json.dumps(options))
-    return net
+            if not G.has_node(b_id):
+                row_data = bnk_dict.get(b_id, {})
+                label = b_id.split("-")[-1] if "-" in b_id else b_id
+                G.add_node(
+                    b_id,
+                    group=3,
+                    color=COLOR_BNK,
+                    title=get_bnk_html(b_id, row_data, is_matched=True),
+                    label=label,
+                    size=24,
+                )
+
+            tooltip = (
+                f"<b>{edge_label_tag} Edge (Gateway ↔ Bank)</b><br>"
+                f"<b>Allocated Amount:</b> ₹{amt:,.2f}<br>"
+                f"<b>Matching Stage:</b> {stage}<br>"
+                f"<b>Match Type:</b> {m_type}<br>"
+                f"<b>Confidence Score:</b> {score:.4f}<br>"
+                f"<b>Audit Notes:</b> {notes}"
+            )
+            G.add_edge(
+                g_id,
+                b_id,
+                title=tooltip,
+                color=edge_color,
+                dashes=is_ai,
+                width=2.5,
+            )
+
+    # Compute deterministic 3-column grid layout
+    compute_grid_layout(G)
+
+    # Custom legend for in-canvas HTML banner
+    custom_legend = (
+        "<span style='color:#9E9E9E;'>━━━━ Solid Grey: Deterministic Match</span> &nbsp;&nbsp;&nbsp;"
+        "<span style='color:#9C27B0;'>- - - Dashed Purple: AI / Probabilistic Match</span>"
+    )
+
+    # Render HTML using visualizer's full interactive template
+    output_html_path = Path("/tmp/graph.html")
+    try:
+        render_graph_html(
+            G,
+            output_file=output_html_path,
+            heading_title=heading_title,
+            show_accuracy_legend=False,
+            custom_edge_legend=custom_legend,
+        )
+    except TypeError:
+        render_graph_html(
+            G,
+            output_file=output_html_path,
+            heading_title=heading_title,
+            show_accuracy_legend=False,
+        )
+    return output_html_path
 
 
 # ==========================================
@@ -415,24 +407,22 @@ def main():
 
         col_ctrl1, col_ctrl2 = st.columns([3, 1])
         with col_ctrl1:
-            st.caption("""
+            st.markdown("""
             **Graph Legend**:
-            - 🟦 **ERP Order Nodes** (Blue box) &nbsp;|&nbsp; 🟧 **Gateway Payments** (Orange box) &nbsp;|&nbsp; 🟩 **Bank Statement Deposits** (Green circle)
-            - ➖ **Solid Grey Edge**: Exact / Bounded Subset Sum Deterministic Match
-            - 🟪 **Dashed Purple Edge**: AI XGBoost Residual Cluster Match (Recovered Noise / Truncated UTR)
+            - 🟦 **ERP Order Nodes** (Left Column) &nbsp;|&nbsp; 🟨 **Gateway Payments** (Middle Column) &nbsp;|&nbsp; 🟩 **Bank Deposits** (Right Column)
+            - ➖ **Solid Grey Edge (`#9E9E9E`)**: Deterministic Match (Exact / Bulk / Tier 1 / Subset Sum)
+            - 🟪 **Dashed Purple Edge (`#9C27B0`)**: AI Probabilistic Match (XGBoost Residual / Fuzzy)
             """)
         with col_ctrl2:
             max_c = st.slider("Max Bank Clusters to Render", min_value=10, max_value=120, value=35, step=5)
 
-        with st.spinner("Rendering interactive PyVis physics network..."):
-            net = build_pyvis_network(data, max_components=max_c)
-            tmp_path = Path("/tmp/graph.html")
-            net.save_graph(str(tmp_path))
+        with st.spinner("Rendering visualizer grid network with side-panel inspection..."):
+            tmp_path = build_pyvis_network_from_visualizer(data, max_components=max_c)
 
             with open(tmp_path, "r", encoding="utf-8") as f:
                 html_content = f.read()
 
-            components.html(html_content, height=720, scrolling=True)
+            components.html(html_content, height=750, scrolling=True)
 
     # =========================================================================
     # TAB 2: AI INFERENCE & INSIGHTS
