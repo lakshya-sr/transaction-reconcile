@@ -51,6 +51,7 @@ def main():
     parser.add_argument("--visualize", "-v", action="store_true", help="Diagnostic: Generate static HTML graph for reconciled predictions (erp_gw_pred, gw_bank_pred)")
     parser.add_argument("--visualize-all", "-va", action="store_true", help="Diagnostic: Generate static HTML graph for GROUND TRUTH (erp_gw_true, gw_bank_true)")
     parser.add_argument("--unmatched", "-u", action="store_true", help="Diagnostic: Show isolated/unmatched records")
+    parser.add_argument("--dashboard", "--ui", action="store_true", help="Launch the interactive Streamlit Reconciliation Dashboard")
 
     # Run All & Control Flags
     parser.add_argument("--all", "-a", action="store_true", help="Run the full pipeline (Gen -> DB -> Match -> Infer -> Eval)")
@@ -137,6 +138,11 @@ def main():
     if args.unmatched:
         print_banner("DIAGNOSTIC: UNMATCHED RECORDS")
         show_unreconciled_records.main()
+
+    if args.dashboard:
+        print_banner("LAUNCHING STREAMLIT RECONCILIATION DASHBOARD")
+        import subprocess
+        subprocess.run(["streamlit", "run", "src/ui/app.py"])
 
     elapsed = time.time() - start_time
     if not is_quiet:
