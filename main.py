@@ -141,8 +141,18 @@ def main():
 
     if args.dashboard:
         print_banner("LAUNCHING STREAMLIT RECONCILIATION DASHBOARD")
+        import os
         import subprocess
-        subprocess.run(["streamlit", "run", "src/ui/app.py"])
+
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(BASE_DIR) + (os.pathsep + env["PYTHONPATH"] if "PYTHONPATH" in env else "")
+
+        app_path = str(BASE_DIR / "src" / "ui" / "app.py")
+        cmd = [sys.executable, "-m", "streamlit", "run", app_path]
+        try:
+            subprocess.run(cmd, env=env, cwd=str(BASE_DIR))
+        except KeyboardInterrupt:
+            print("\n[✔] Streamlit dashboard closed.")
 
     elapsed = time.time() - start_time
     if not is_quiet:
