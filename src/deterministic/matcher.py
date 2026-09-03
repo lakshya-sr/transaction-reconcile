@@ -79,6 +79,53 @@ def fetch_unmatched_records(db_path: Path = DB_PATH) -> Tuple[pd.DataFrame, pd.D
     return df_erp, df_gateway, df_bank
 
 
+def _invoice_keys(raw: str) -> List[str]:
+    """Return a set of normalised lookup keys for an invoice string.
+
+    Generates up to three forms so that prefix/casing mismatches are handled:
+      1. raw uppercased                     e.g. "INV-ABC123"
+      2. stripped of common prefixes        e.g. "ABC123"
+      3. stripped + alphanumeric only       e.g. "ABC123" (removes dashes)
+    """
+    keys = []
+    clean = raw.strip().upper()
+    if not clean or clean == "NAN":
+        return keys
+    keys.append(clean)
+    for prefix in ("INV-", "INV_", "ORD-", "ORD_", "INV", "ORD"):
+        if clean.startswith(prefix):
+            stripped = clean[len(prefix):]
+            if stripped:
+                keys.append(stripped)
+            break
+    alnum = re.sub(r"[^A-Z0-9]", "", clean)
+    if alnum and alnum not in keys:
+        keys.append(alnum)
+    return keys
+
+
+def _parse_erp_dt(record: dict) -> Optional[datetime]:
+    """Parse ERP entry_date into a datetime object, returning None on failure."""
+    raw = str(record.get("entry_date", ""))
+    for fmt, length in [("%Y-%m-%d %H:%M:%S", 19), ("%Y-%m-%d", 10)]:
+        try:
+            return datetime.strptime(raw[:length], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_gw_dt(record: dict) -> Optional[datetime]:
+    """Parse Gateway settled_at into a datetime object, returning None on failure."""
+    raw = str(record.get("settled_at", ""))
+    for fmt, length in [("%Y-%m-%d %H:%M:%S", 19), ("%Y-%m-%d", 10)]:
+        try:
+            return datetime.strptime(raw[:length], fmt)
+        except ValueError:
+            continue
+    return None
+
+
 class ReconciliationEngine:
     def __init__(self, df_erp: pd.DataFrame, df_gateway: pd.DataFrame, df_bank: pd.DataFrame):
         self.df_erp = df_erp
@@ -150,12 +197,15 @@ class ReconciliationEngine:
                         }
 
         gw_by_utr = {}
+        gw_by_utr_prefix = {}
         for row in self.gw_records:
             g_id = row["payment_id"]
             if g_id not in self.gw_linked_to_bank:
                 utr = row.get("bank_utr")
                 if utr and pd.notna(utr):
                     gw_by_utr.setdefault(utr, []).append(row)
+                    if len(utr) > 3:
+                        gw_by_utr_prefix.setdefault(utr[:-3], []).append(row)
 
         bank_by_utr = {}
         for row in self.bank_records:
@@ -166,8 +216,11 @@ class ReconciliationEngine:
                     bank_by_utr.setdefault(utr, []).append(row)
 
         for utr, b_rows in bank_by_utr.items():
-            if utr in gw_by_utr:
-                g_rows = gw_by_utr[utr]
+            g_rows = gw_by_utr.get(utr)
+            if not g_rows and utr in gw_by_utr_prefix:
+                g_rows = gw_by_utr_prefix[utr]
+
+            if g_rows:
                 sum_bank = round(sum(float(r["credit_amount"]) for r in b_rows), 2)
                 sum_gw = round(sum(float(r["net_settled"]) for r in g_rows), 2)
 
@@ -181,12 +234,61 @@ class ReconciliationEngine:
                         self.gw_linked_to_bank.add(gw_pid)
                         self.gw_bank_links[gw_pid] = {
                             "bank_ids": b_ids,
-                            "utr": utr,
+                            "utr": g.get("bank_utr", utr),
                             "match_type": MATCH_TYPE_BULK if len(g_rows) > 1 else MATCH_TYPE_EXACT,
                             "matching_stage": STAGE_T1_IDENTIFIER,
                             "score": 1.00,
                             "note": f"Tier 1: Bank UTR match ({utr})."
                         }
+
+        # Match 1:N Reserve Splits (1 GW payment -> 2 Bank entries: MAIN + RSV)
+        main_banks = [r for r in self.bank_records if r["bank_entry_id"] not in self.matched_bank_entries and str(r["bank_entry_id"]).endswith("-MAIN")]
+        rsv_banks = [r for r in self.bank_records if r["bank_entry_id"] not in self.matched_bank_entries and str(r["bank_entry_id"]).endswith("-RSV")]
+
+        rsv_by_utr: Dict[str, dict] = {}
+        for rb in rsv_banks:
+            u = extract_utr_number(rb.get("remittance_info", ""))
+            if u:
+                rsv_by_utr[u] = rb
+
+        for mb in main_banks:
+            u = extract_utr_number(mb.get("remittance_info", ""))
+            if not u:
+                continue
+
+            rb = rsv_by_utr.get(u)
+            if rb is None and len(u) > 3 and u[:-3] in rsv_by_utr:
+                rb = rsv_by_utr[u[:-3]]
+            if rb is None:
+                for ru, r_row in rsv_by_utr.items():
+                    if u.startswith(ru) or ru.startswith(u):
+                        rb = r_row
+                        break
+
+            if rb is not None:
+                tot_credit = round(float(mb["credit_amount"]) + float(rb["credit_amount"]), 2)
+                gw_rows = gw_by_utr.get(u)
+                if not gw_rows and u in gw_by_utr_prefix:
+                    gw_rows = gw_by_utr_prefix[u]
+
+                if gw_rows and len(gw_rows) == 1:
+                    gw_row = gw_rows[0]
+                    gw_pid = gw_row["payment_id"]
+                    if gw_pid not in self.gw_linked_to_bank:
+                        gw_net = round(float(gw_row["net_settled"]), 2)
+                        if abs(tot_credit - gw_net) < 0.01:
+                            b_ids = [mb["bank_entry_id"], rb["bank_entry_id"]]
+                            self.matched_bank_entries.add(mb["bank_entry_id"])
+                            self.matched_bank_entries.add(rb["bank_entry_id"])
+                            self.gw_linked_to_bank.add(gw_pid)
+                            self.gw_bank_links[gw_pid] = {
+                                "bank_ids": b_ids,
+                                "utr": gw_row.get("bank_utr", u),
+                                "match_type": MATCH_TYPE_EXACT,
+                                "matching_stage": STAGE_T1_IDENTIFIER,
+                                "score": 1.00,
+                                "note": f"Tier 1: 1:N Reserve split match ({mb['bank_entry_id']} + {rb['bank_entry_id']})."
+                            }
 
     def match_exact_gateway_to_bank(self):
         self.match_tier1_identifier_clusters_gateway_to_bank()
@@ -201,10 +303,8 @@ class ReconciliationEngine:
 
         gw_pool = []
         for gw in unmatched_gws:
-            settled_str = str(gw.get("settled_at", ""))[:10]
-            try:
-                gw_dt = datetime.strptime(settled_str, "%Y-%m-%d")
-            except Exception:
+            gw_dt = _parse_gw_dt(gw)
+            if gw_dt is None:
                 continue
             cents = int(round(float(gw.get("net_settled", 0.0)) * 100))
             utr = str(gw.get("bank_utr", ""))
@@ -228,19 +328,26 @@ class ReconciliationEngine:
 
             valid_gws = [
                 item for item in gw_pool
-                if window_start <= item[0] <= window_end and item[1]["payment_id"] not in self.gw_linked_to_bank
+                if window_start.date() <= item[0].date() <= window_end.date() and item[1]["payment_id"] not in self.gw_linked_to_bank
             ]
 
             if not valid_gws:
                 continue
 
             remittance = str(b.get("remittance_info", ""))
+            utr_in_rem = extract_utr_number(remittance)
+
             anchor_gws = []
             for dt, gw, cents, utr, invs in valid_gws:
-                if utr and len(utr) >= 6 and (utr in remittance or utr[:-3] in remittance):
-                    anchor_gws.append((dt, gw, cents))
-                elif any(inv and (inv in remittance or inv.replace("INV-", "") in remittance) for inv in invs):
-                    anchor_gws.append((dt, gw, cents))
+                if utr_in_rem:
+                    # If remittance explicitly specifies a UTR, require UTR agreement (full or truncated prefix)
+                    if utr and (utr == utr_in_rem or utr.startswith(utr_in_rem) or utr[:-3] == utr_in_rem):
+                        anchor_gws.append((dt, gw, cents))
+                else:
+                    if utr and len(utr) >= 6 and (utr in remittance or utr[:-3] in remittance):
+                        anchor_gws.append((dt, gw, cents))
+                    elif any(inv and (inv in remittance or inv.replace("INV-", "") in remittance) for inv in invs):
+                        anchor_gws.append((dt, gw, cents))
 
             if not anchor_gws:
                 continue
@@ -250,15 +357,16 @@ class ReconciliationEngine:
             for a_dt, anchor, a_cents in anchor_gws:
                 if a_cents == target_cents:
                     found_subsets.append([anchor])
-                    break
+                    continue
 
                 rem_target = target_cents - a_cents
                 if rem_target <= 0:
                     continue
 
+                # Batch settlements are bundled from the queue throughout the daily simulation cycle
                 nearby_gws = [
                     (dt, gw, cents) for dt, gw, cents, _, _ in valid_gws
-                    if abs((dt - a_dt).total_seconds()) <= 43200
+                    if abs((dt - a_dt).total_seconds()) <= 64800
                     and gw["payment_id"] != anchor["payment_id"]
                     and cents <= rem_target
                 ]
@@ -284,8 +392,6 @@ class ReconciliationEngine:
                         find_subsets(i + 1, current_sum + item_val, path + [nearby_gws[i][1]])
 
                 find_subsets(0, 0, [])
-                if found_subsets:
-                    break
 
             selected_subset = found_subsets[0] if len(found_subsets) == 1 else None
 
@@ -308,24 +414,41 @@ class ReconciliationEngine:
         self.match_tier2_3_4_bounded_subset_sum_gateway_to_bank(max_delay_days)
 
     def match_exact_erp_to_gateway(self):
-        adj, erp_amounts, gw_amounts = {}, {}, {}
+        """
+        Tier 1: Invoice-keyed exact match with connected-component sum balancing.
+        Tolerance raised to 5 cents to handle float rounding in splits.
+        """
+        erp_inv_index: Dict[str, str] = {}
+        for r in self.erp_records:
+            raw = str(r.get("invoice_number") or "")
+            if not raw or raw == "nan":
+                continue
+            erp_id = r["erp_entry_id"]
+            for key in _invoice_keys(raw):
+                erp_inv_index[key] = erp_id
+
+        adj: Dict[str, List[str]] = {}
+        erp_amounts: Dict[str, float] = {}
+
         for row in self.erp_records:
             node_id = row["erp_entry_id"]
             adj[node_id] = []
             erp_amounts[node_id] = float(row["gross_amount"])
-            
+
+        gw_amounts: Dict[str, float] = {}
         for row in self.gw_records:
             gw_id = row["payment_id"]
             adj[gw_id] = []
             gw_amounts[gw_id] = float(row["gross_amount"])
             for inv in parse_invoices(row.get("invoices")):
-                erp_match = self.erp_by_inv.get(str(inv))
-                if erp_match:
-                    erp_id = erp_match["erp_entry_id"]
-                    adj[gw_id].append(erp_id)
-                    adj[erp_id].append(gw_id)
+                for key in _invoice_keys(str(inv)):
+                    erp_id = erp_inv_index.get(key)
+                    if erp_id:
+                        adj[gw_id].append(erp_id)
+                        adj[erp_id].append(gw_id)
+                        break
 
-        visited = set()
+        visited: set = set()
         for node in list(adj.keys()):
             if node not in visited:
                 comp, stack = [], [node]
@@ -335,39 +458,153 @@ class ReconciliationEngine:
                         visited.add(curr)
                         comp.append(curr)
                         stack.extend(adj.get(curr, []))
-                
+
                 erp_nodes = [n for n in comp if n.startswith("ERP-")]
-                gw_nodes = [n for n in comp if n.startswith("GW-")]
-                
+                gw_nodes  = [n for n in comp if n.startswith("GW-")]
+
                 if erp_nodes and gw_nodes:
                     sum_erp = sum(erp_amounts[n] for n in erp_nodes)
-                    sum_gw = sum(gw_amounts[n] for n in gw_nodes)
+                    sum_gw  = sum(gw_amounts[n]  for n in gw_nodes)
 
-                    if abs(sum_erp - sum_gw) < 0.01:
-                        for e in erp_nodes: self.matched_erp_entries.add(e)
+                    if abs(sum_erp - sum_gw) < 0.05:
+                        for e in erp_nodes:
+                            self.matched_erp_entries.add(e)
                         for g in gw_nodes:
                             self.gw_linked_to_erp.add(g)
                             self.gw_to_erp_links.setdefault(g, []).extend(erp_nodes)
                             for e in erp_nodes:
                                 self.erp_gw_stage_map.setdefault(g, {})[e] = STAGE_EXACT_ERP_GW
 
-    def match_tier2_erp_to_gw_many_to_one(self):
-        """N:1 Bundled Cart: Group multiple unmatched ERP orders that sum to an unmatched Gateway gross amount (within ±1 hour)."""
-        unmatched_erps = [r for r in self.erp_records if r["erp_entry_id"] not in self.matched_erp_entries]
-        unmatched_gws = [r for r in self.gw_records if r["payment_id"] not in self.gw_linked_to_erp]
+    def match_tier1_5_invoice_partial_split(self):
+        """
+        Tier 1.5: Handles 1→N GW reserve-splits where only ONE GW carries the invoice.
 
+        Pattern: ERP amount = sum of 2+ GW payouts, but only the anchor GW has the
+        invoice in its list (the rest dropped it). Tier 1 rejects such components
+        because anchor_gw_gross != erp_gross. This tier searches for partner GWs
+        that complete the sum.
+        """
+        erp_inv_index: Dict[str, str] = {}
+        for r in self.erp_records:
+            raw = str(r.get("invoice_number") or "")
+            if not raw or raw == "nan":
+                continue
+            for key in _invoice_keys(raw):
+                erp_inv_index[key] = r["erp_entry_id"]
+
+        unmatched_gw_pool = [
+            r for r in self.gw_records if r["payment_id"] not in self.gw_linked_to_erp
+        ]
+
+        for anchor_gw in list(unmatched_gw_pool):
+            anchor_id = anchor_gw["payment_id"]
+            if anchor_id in self.gw_linked_to_erp:
+                continue
+
+            # Find which unmatched ERP this anchor GW's invoice points to
+            erp_id = None
+            for inv in parse_invoices(anchor_gw.get("invoices")):
+                for key in _invoice_keys(str(inv)):
+                    candidate = erp_inv_index.get(key)
+                    if candidate and candidate not in self.matched_erp_entries:
+                        erp_id = candidate
+                        break
+                if erp_id:
+                    break
+            if not erp_id:
+                continue
+
+            erp_rec = self.erp_by_id.get(erp_id)
+            if not erp_rec:
+                continue
+
+            erp_gross = float(erp_rec["gross_amount"])
+            anchor_gross = float(anchor_gw["gross_amount"])
+
+            # Only trigger when anchor is a proper sub-amount of ERP
+            if anchor_gross >= erp_gross - 0.05:
+                continue
+
+            remainder = erp_gross - anchor_gross
+            anchor_dt = _parse_gw_dt(anchor_gw)
+            if not anchor_dt:
+                continue
+
+            # Genuine 1:N splits occur simultaneously during the same tick (max delay < 15 mins).
+            # Tighten window to ±2 hours to prevent matching same-amount transactions from other days.
+            window_start = anchor_dt - timedelta(hours=2)
+            window_end   = anchor_dt + timedelta(hours=2)
+
+            # Find partner GWs covering the remainder
+            valid_partners = []
+            for p in unmatched_gw_pool:
+                if p["payment_id"] == anchor_id or p["payment_id"] in self.gw_linked_to_erp:
+                    continue
+                p_dt = _parse_gw_dt(p)
+                if not p_dt or not (window_start <= p_dt <= window_end):
+                    continue
+                p_gross = float(p["gross_amount"])
+                if p_gross > remainder + 0.05:
+                    continue
+                valid_partners.append((p_gross, p))
+
+            if not valid_partners:
+                continue
+
+            # DP to find partners that cover the remainder within ±5 cents
+            target_rem_cents = int(round(remainder * 100))
+            partner_map: Dict[int, List[str]] = {0: []}
+            for p_gross, p_rec in sorted(valid_partners, key=lambda x: x[0], reverse=True):
+                p_cents = int(round(p_gross * 100))
+                for cur_sum, path in list(partner_map.items()):
+                    cand = cur_sum + p_cents
+                    if cand > target_rem_cents + 5:
+                        continue
+                    if cand not in partner_map:
+                        partner_map[cand] = path + [p_rec["payment_id"]]
+
+            best_key = None
+            for k in partner_map:
+                if abs(k - target_rem_cents) <= 5 and partner_map[k]:
+                    if best_key is None or abs(k - target_rem_cents) < abs(best_key - target_rem_cents):
+                        best_key = k
+
+            if best_key is None:
+                continue
+
+            partner_gw_ids = partner_map[best_key]
+            all_gw_ids = [anchor_id] + partner_gw_ids
+
+            # Final sanity: total GW gross must be within 5 cents of ERP gross
+            total_gw = anchor_gross + sum(
+                float(self.gw_by_id[g]["gross_amount"])
+                for g in partner_gw_ids if g in self.gw_by_id
+            )
+            if abs(total_gw - erp_gross) > 0.05:
+                continue
+
+            self.matched_erp_entries.add(erp_id)
+            for g_id in all_gw_ids:
+                self.gw_linked_to_erp.add(g_id)
+                self.gw_to_erp_links.setdefault(g_id, []).append(erp_id)
+                self.erp_gw_stage_map.setdefault(g_id, {})[erp_id] = STAGE_T3_SUBSET_SUM_SPLIT
+
+    def match_tier2_erp_to_gw_many_to_one(self):
+        """
+        N:1 Bundled Cart: multiple unmatched ERP orders whose gross_amounts sum
+        to a single unmatched GW gross_amount (±2 cents DP tolerance).
+        Window: GW_dt −48h / +6h.
+        """
+        unmatched_erps = [r for r in self.erp_records if r["erp_entry_id"] not in self.matched_erp_entries]
+        unmatched_gws  = [r for r in self.gw_records  if r["payment_id"]    not in self.gw_linked_to_erp]
         if not unmatched_erps or not unmatched_gws:
             return
 
         erp_pool = []
         for e in unmatched_erps:
-            try:
-                dt = datetime.strptime(str(e.get("entry_date", ""))[:19], "%Y-%m-%d %H:%M:%S")
-            except Exception:
-                try:
-                    dt = datetime.strptime(str(e.get("entry_date", ""))[:10], "%Y-%m-%d")
-                except Exception:
-                    continue
+            dt = _parse_erp_dt(e)
+            if dt is None:
+                continue
             cents = int(round(float(e.get("gross_amount", 0.0)) * 100))
             erp_pool.append((dt, e, cents))
 
@@ -375,44 +612,66 @@ class ReconciliationEngine:
             gw_id = gw["payment_id"]
             if gw_id in self.gw_linked_to_erp:
                 continue
-            try:
-                gw_dt = datetime.strptime(str(gw.get("settled_at", ""))[:19], "%Y-%m-%d %H:%M:%S")
-            except Exception:
-                try:
-                    gw_dt = datetime.strptime(str(gw.get("settled_at", ""))[:10], "%Y-%m-%d")
-                except Exception:
-                    continue
+            gw_dt = _parse_gw_dt(gw)
+            if gw_dt is None:
+                continue
             target_cents = int(round(float(gw.get("gross_amount", 0.0)) * 100))
 
-            window_start = gw_dt - timedelta(hours=1)
-            window_end = gw_dt + timedelta(hours=1)
+            # Pre-extract GW invoice keys for corroboration check
+            gw_inv_keys: set = set()
+            for inv in parse_invoices(gw.get("invoices")):
+                gw_inv_keys.update(_invoice_keys(str(inv)))
+
+            # Tier 2 only applies to N:1 bundles — GW must carry invoices
+            # (if the GW has no invoices at all, skip; Tier 4 handles those)
+            if not gw_inv_keys:
+                continue
+
+            window_start = gw_dt - timedelta(hours=24)
+            window_end   = gw_dt + timedelta(hours=6)
 
             valid_erps = [
                 (dt, e, cents) for dt, e, cents in erp_pool
-                if window_start <= dt <= window_end and e["erp_entry_id"] not in self.matched_erp_entries
+                if window_start <= dt <= window_end
+                and e["erp_entry_id"] not in self.matched_erp_entries
+                and cents < target_cents
             ]
             if not valid_erps:
                 continue
 
-            valid_erps.sort(key=lambda x: x[2], reverse=True)
+            # Invoice corroboration: at least one candidate ERP's invoice must
+            # appear in the GW's invoices list (genuine bundled carts always have this)
+            def erp_inv_in_gw(erp_rec):
+                raw = str(erp_rec.get("invoice_number") or "").strip()
+                if not raw or raw.lower() == "nan":
+                    return False
+                return bool(set(_invoice_keys(raw)) & gw_inv_keys)
 
-            sum_map = {0: []}
-            found = False
+            valid_erps = [(dt, e, cents) for dt, e, cents in valid_erps if erp_inv_in_gw(e)]
+            if len(valid_erps) < 2:
+                continue
+
+            valid_erps.sort(key=lambda x: x[2], reverse=True)
+            if sum(c for _, _, c in valid_erps) < target_cents - 2:
+                continue
+
+            sum_map: Dict[int, List[str]] = {0: []}
             for _, e, cents in valid_erps:
                 for current_sum, path in list(sum_map.items()):
                     candidate_sum = current_sum + cents
-                    if candidate_sum > target_cents:
+                    if candidate_sum > target_cents + 2:
                         continue
                     if candidate_sum not in sum_map:
                         sum_map[candidate_sum] = path + [e["erp_entry_id"]]
-                    if candidate_sum == target_cents:
-                        found = True
-                        break
-                if found:
-                    break
 
-            if target_cents in sum_map and len(sum_map[target_cents]) > 1:
-                erp_ids = sum_map[target_cents]
+            best_key = None
+            for k in sum_map:
+                if abs(k - target_cents) <= 2 and len(sum_map[k]) >= 2:
+                    if best_key is None or abs(k - target_cents) < abs(best_key - target_cents):
+                        best_key = k
+
+            if best_key is not None:
+                erp_ids = sum_map[best_key]
                 self.gw_linked_to_erp.add(gw_id)
                 for e_id in erp_ids:
                     self.matched_erp_entries.add(e_id)
@@ -421,72 +680,166 @@ class ReconciliationEngine:
                     self.erp_gw_stage_map.setdefault(gw_id, {})[e_id] = STAGE_T2_SUBSET_SUM
 
     def match_tier3_erp_to_gw_one_to_many(self):
-        """1:N Reserve Split: Group multiple unmatched Gateway payouts that sum to an unmatched ERP gross amount (within ±1 hour)."""
-        unmatched_erps = [r for r in self.erp_records if r["erp_entry_id"] not in self.matched_erp_entries]
-        unmatched_gws = [r for r in self.gw_records if r["payment_id"] not in self.gw_linked_to_erp]
+        """
+        1:N Reserve Split: one ERP order split across multiple GW payouts whose
+        gross_amounts sum to the ERP gross_amount (±2 cents DP tolerance).
+        Window: ERP_dt −6h / +48h.
 
+        Safety guards to eliminate false positives:
+        - At least one candidate GW must carry the ERP's invoice number.
+          (In all genuine splits, the simulation always places the invoice on
+          at least one GW payout.)
+        - Skip if any single GW in the window exactly matches the ERP amount
+          (Tier 4 will handle 1:1 no-invoice matches; Tier 3 is for N>1 splits).
+        """
+        unmatched_erps = [r for r in self.erp_records if r["erp_entry_id"] not in self.matched_erp_entries]
+        unmatched_gws  = [r for r in self.gw_records  if r["payment_id"]    not in self.gw_linked_to_erp]
         if not unmatched_erps or not unmatched_gws:
             return
 
         gw_pool = []
         for gw in unmatched_gws:
-            try:
-                dt = datetime.strptime(str(gw.get("settled_at", ""))[:19], "%Y-%m-%d %H:%M:%S")
-            except Exception:
-                try:
-                    dt = datetime.strptime(str(gw.get("settled_at", ""))[:10], "%Y-%m-%d")
-                except Exception:
-                    continue
+            dt = _parse_gw_dt(gw)
+            if dt is None:
+                continue
             cents = int(round(float(gw.get("gross_amount", 0.0)) * 100))
-            gw_pool.append((dt, gw, cents))
+            invs = parse_invoices(gw.get("invoices"))
+            gw_pool.append((dt, gw, cents, invs))
 
         for erp in unmatched_erps:
             erp_id = erp["erp_entry_id"]
             if erp_id in self.matched_erp_entries:
                 continue
-            try:
-                erp_dt = datetime.strptime(str(erp.get("entry_date", ""))[:19], "%Y-%m-%d %H:%M:%S")
-            except Exception:
-                try:
-                    erp_dt = datetime.strptime(str(erp.get("entry_date", ""))[:10], "%Y-%m-%d")
-                except Exception:
-                    continue
+            erp_dt = _parse_erp_dt(erp)
+            if erp_dt is None:
+                continue
             target_cents = int(round(float(erp.get("gross_amount", 0.0)) * 100))
+            erp_inv_raw  = str(erp.get("invoice_number") or "").upper().strip()
+            erp_inv_keys = set(_invoice_keys(erp_inv_raw)) if erp_inv_raw else set()
 
-            window_start = erp_dt - timedelta(hours=1)
-            window_end = erp_dt + timedelta(hours=1)
+            window_start = erp_dt - timedelta(hours=6)
+            window_end   = erp_dt + timedelta(hours=48)
 
             valid_gws = [
-                (dt, gw, cents) for dt, gw, cents in gw_pool
-                if window_start <= dt <= window_end and gw["payment_id"] not in self.gw_linked_to_erp
+                (dt, gw, cents, invs) for dt, gw, cents, invs in gw_pool
+                if window_start <= dt <= window_end
+                and gw["payment_id"] not in self.gw_linked_to_erp
+                and cents < target_cents
             ]
             if not valid_gws:
                 continue
 
-            valid_gws.sort(key=lambda x: x[2], reverse=True)
+            # Guard 1: skip if any single GW exactly matches the full ERP amount
+            # (that's a 1:1 match for Tier 4, not a split for Tier 3)
+            if any(abs(cents - target_cents) <= 2 for _, _, cents, _ in valid_gws):
+                continue
 
-            sum_map = {0: []}
-            found = False
-            for _, gw, cents in valid_gws:
+            # Guard 2: require invoice corroboration — at least one GW must carry
+            # this ERP's invoice (genuine splits always have the invoice on ≥1 GW)
+            if erp_inv_keys:
+                def gw_has_invoice(invs):
+                    for inv in invs:
+                        if set(_invoice_keys(str(inv))) & erp_inv_keys:
+                            return True
+                    return False
+                if not any(gw_has_invoice(invs) for _, _, _, invs in valid_gws):
+                    continue
+
+            valid_gws_simple = [(dt, gw, cents) for dt, gw, cents, _ in valid_gws]
+            valid_gws_simple.sort(key=lambda x: x[2], reverse=True)
+            if sum(c for _, _, c in valid_gws_simple) < target_cents - 2:
+                continue
+
+            sum_map: Dict[int, List[str]] = {0: []}
+            for _, gw, cents in valid_gws_simple:
                 for current_sum, path in list(sum_map.items()):
                     candidate_sum = current_sum + cents
-                    if candidate_sum > target_cents:
+                    if candidate_sum > target_cents + 2:
                         continue
                     if candidate_sum not in sum_map:
                         sum_map[candidate_sum] = path + [gw["payment_id"]]
-                    if candidate_sum == target_cents:
-                        found = True
-                        break
-                if found:
-                    break
 
-            if target_cents in sum_map and len(sum_map[target_cents]) > 1:
-                gw_ids = sum_map[target_cents]
+            best_key = None
+            for k in sum_map:
+                if abs(k - target_cents) <= 2 and 2 <= len(sum_map[k]) <= 3:
+                    if best_key is None or abs(k - target_cents) < abs(best_key - target_cents):
+                        best_key = k
+
+            if best_key is not None:
+                gw_ids = sum_map[best_key]
                 self.matched_erp_entries.add(erp_id)
                 for gw_id in gw_ids:
                     self.gw_linked_to_erp.add(gw_id)
                     self.gw_to_erp_links.setdefault(gw_id, []).append(erp_id)
                     self.erp_gw_stage_map.setdefault(gw_id, {})[erp_id] = STAGE_T3_SUBSET_SUM_SPLIT
+
+    def match_tier4_erp_to_gw_amount_temporal(self):
+        """
+        Tier 4: Amount + temporal fallback for GW records with no invoice.
+        - 1 candidate in 72h window → commit (unambiguous).
+        - 2-3 candidates → try a tighter 24h sub-window; commit if unique there.
+        - >3 candidates → leave for XGBoost.
+        Uses ±2 cent tolerance to handle GW split rounding.
+        """
+        unmatched_erps = [r for r in self.erp_records if r["erp_entry_id"] not in self.matched_erp_entries]
+        unmatched_gws  = [
+            r for r in self.gw_records
+            if r["payment_id"] not in self.gw_linked_to_erp
+            and not parse_invoices(r.get("invoices"))
+        ]
+        if not unmatched_erps or not unmatched_gws:
+            return
+
+        erp_by_cents: Dict[int, List[Tuple]] = {}
+        for e in unmatched_erps:
+            dt = _parse_erp_dt(e)
+            if dt is None:
+                continue
+            cents = int(round(float(e.get("gross_amount", 0.0)) * 100))
+            erp_by_cents.setdefault(cents, []).append((dt, e))
+
+        for gw in unmatched_gws:
+            gw_id = gw["payment_id"]
+            if gw_id in self.gw_linked_to_erp:
+                continue
+            gw_dt = _parse_gw_dt(gw)
+            if gw_dt is None:
+                continue
+            target_cents = int(round(float(gw.get("gross_amount", 0.0)) * 100))
+
+            window_start = gw_dt - timedelta(hours=72)
+            window_end   = gw_dt + timedelta(hours=6)
+
+            # Gather candidates with ±2 cent tolerance
+            seen_eids: set = set()
+            candidates = []
+            for delta_c in range(-2, 3):
+                for dt, e in erp_by_cents.get(target_cents + delta_c, []):
+                    eid = e["erp_entry_id"]
+                    if eid not in seen_eids and window_start <= dt <= window_end and eid not in self.matched_erp_entries:
+                        seen_eids.add(eid)
+                        candidates.append((dt, e))
+
+            if len(candidates) == 1:
+                _, erp = candidates[0]
+                erp_id = erp["erp_entry_id"]
+                self.matched_erp_entries.add(erp_id)
+                self.gw_linked_to_erp.add(gw_id)
+                self.gw_to_erp_links.setdefault(gw_id, []).append(erp_id)
+                self.erp_gw_stage_map.setdefault(gw_id, {})[erp_id] = STAGE_FUZZY_ERP_GW
+
+            elif 2 <= len(candidates) <= 3:
+                # Tighter 24h sub-window tiebreaker
+                tight_start = gw_dt - timedelta(hours=24)
+                tight_end   = gw_dt + timedelta(hours=4)
+                tight = [(dt, e) for dt, e in candidates if tight_start <= dt <= tight_end]
+                if len(tight) == 1:
+                    _, erp = tight[0]
+                    erp_id = erp["erp_entry_id"]
+                    self.matched_erp_entries.add(erp_id)
+                    self.gw_linked_to_erp.add(gw_id)
+                    self.gw_to_erp_links.setdefault(gw_id, []).append(erp_id)
+                    self.erp_gw_stage_map.setdefault(gw_id, {})[erp_id] = STAGE_FUZZY_ERP_GW
 
     def match_fuzzy_gateway_to_bank(self):
         unmatched_gws = [r for r in self.gw_records if r["payment_id"] not in self.gw_linked_to_bank]
@@ -607,9 +960,11 @@ class ReconciliationEngine:
                 })
 
     def run(self, deterministic_only: bool = True):
-        self.match_exact_erp_to_gateway()
-        self.match_tier2_erp_to_gw_many_to_one()
-        self.match_tier3_erp_to_gw_one_to_many()
+        self.match_exact_erp_to_gateway()          # Tier 1:   invoice-keyed exact match
+        self.match_tier1_5_invoice_partial_split() # Tier 1.5: partial split (one GW has invoice)
+        self.match_tier2_erp_to_gw_many_to_one()  # Tier 2:   N:1 bundled cart
+        self.match_tier4_erp_to_gw_amount_temporal()  # Tier 4: 1:1 amount+temporal (before Tier 3)
+        self.match_tier3_erp_to_gw_one_to_many()  # Tier 3:   1:N reserve split (invoice-guarded)
         self.match_exact_gateway_to_bank()
         self.match_combinatorial_gateway_to_bank()
         if not deterministic_only:

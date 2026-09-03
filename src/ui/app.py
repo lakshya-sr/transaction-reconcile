@@ -198,14 +198,14 @@ def build_pyvis_network_from_visualizer(
 
     # Filter to top components if graph is large
     active_bank = set(df_pgb["bank_entry_id"].dropna()) if not df_pgb.empty else set()
-    if max_components and len(active_bank) > max_components:
-        selected_banks = set(list(active_bank)[:max_components])
-        df_pgb_sub = df_pgb[df_pgb["bank_entry_id"].isin(selected_banks)]
-        selected_gws = set(df_pgb_sub["gateway_payment_id"].dropna())
-        df_peg_sub = df_peg[df_peg["gateway_payment_id"].isin(selected_gws)]
-    else:
-        df_peg_sub = df_peg
-        df_pgb_sub = df_pgb
+    # if max_components and len(active_bank) > max_components:
+    #     selected_banks = set(list(active_bank)[:max_components])
+    #     df_pgb_sub = df_pgb[df_pgb["bank_entry_id"].isin(selected_banks)]
+    #     selected_gws = set(df_pgb_sub["gateway_payment_id"].dropna())
+    #     df_peg_sub = df_peg[df_peg["gateway_payment_id"].isin(selected_gws)]
+    # else:
+    df_peg_sub = df_peg
+    df_pgb_sub = df_pgb
 
     # 1. ERP <-> Gateway Edges
     if not df_peg_sub.empty:
@@ -414,7 +414,7 @@ def main():
             - 🟪 **Dashed Purple Edge (`#9C27B0`)**: AI Probabilistic Match (XGBoost Residual / Fuzzy)
             """)
         with col_ctrl2:
-            max_c = st.slider("Max Bank Clusters to Render", min_value=10, max_value=120, value=35, step=5)
+            max_c = st.slider("Max Bank Clusters to Render", min_value=10, max_value=300, value=35, step=5)
 
         with st.spinner("Rendering visualizer grid network with side-panel inspection..."):
             tmp_path = build_pyvis_network_from_visualizer(data, max_components=max_c)
