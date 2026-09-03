@@ -8,7 +8,7 @@ along with all records from `erp_ledger`, `gateway_settlements`, and `bank_state
 
 from pathlib import Path
 from src.core.config import DB_PATH, ALL_DATA_GRAPH_PATH
-from src.reporting.visualizer import generate_graph_visualization
+from src.reporting.visualizer import generate_graph_visualization, open_html_in_browser
 
 
 def main():
@@ -27,6 +27,7 @@ def main():
 
     print(f"[✔] Ground truth visualization saved to: {output_path}")
     print("=" * 80)
+    open_html_in_browser(output_path)
 
 
 if __name__ == "__main__":

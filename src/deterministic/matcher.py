@@ -46,13 +46,23 @@ def extract_settlement_id(remittance_info: str) -> Optional[str]:
     return match.group(1) if match else None
 
 def parse_invoices(val) -> List[str]:
-    if pd.isna(val) or not val: return []
-    if isinstance(val, list): return val
+    if val is None:
+        return []
+    if isinstance(val, (list, tuple)):
+        return [str(x) for x in val if x]
+    if isinstance(val, float) and pd.isna(val):
+        return []
     if isinstance(val, str):
         val = val.strip()
+        if not val:
+            return []
         if val.startswith('['):
-            try: return ast.literal_eval(val)
-            except (ValueError, SyntaxError): pass
+            try:
+                parsed = ast.literal_eval(val)
+                if isinstance(parsed, (list, tuple)):
+                    return [str(x) for x in parsed if x]
+            except (ValueError, SyntaxError):
+                pass
         return [val.replace('"', '').replace("'", "")]
     return []
 

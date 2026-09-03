@@ -121,14 +121,18 @@ def main():
         with suppress_stdout(suppress_internal):
             reconciled_records.main()
         if not is_quiet and not is_verbose:
-            print("[✔] Reconciled predictions graph generated.")
+            from src.core.config import RECONCILIATION_GRAPH_PATH
+            from src.reporting.visualizer import open_html_in_browser
+            open_html_in_browser(RECONCILIATION_GRAPH_PATH)
 
     if args.visualize_all:
         print_banner("DIAGNOSTIC: GRAPH VISUALIZATION (ALL DATA)")
         with suppress_stdout(suppress_internal):
             all_records_visualizer.main()
         if not is_quiet and not is_verbose:
-            print("[✔] Ground truth all-data graph generated.")
+            from src.core.config import ALL_DATA_GRAPH_PATH
+            from src.reporting.visualizer import open_html_in_browser
+            open_html_in_browser(ALL_DATA_GRAPH_PATH)
 
     if args.unmatched:
         print_banner("DIAGNOSTIC: UNMATCHED RECORDS")

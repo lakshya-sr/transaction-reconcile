@@ -10,7 +10,7 @@ import math
 import shutil
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Union
 
 import networkx as nx
 import pandas as pd
@@ -568,5 +568,31 @@ def generate_graph_visualization(
     compute_grid_layout(G)
     saved_path = render_graph_html(G, output_file, heading_title=heading_title, show_accuracy_legend=not use_ground_truth)
     return saved_path
+
+
+def open_html_in_browser(file_path: Union[str, Path]) -> bool:
+    """
+    Attempts to open the generated HTML visualization in the default web browser.
+    If it fails or if in a headless environment, prints the file URI to open manually.
+    """
+    path_obj = Path(file_path).resolve()
+    file_uri = path_obj.as_uri()
+    opened = False
+
+    try:
+        import webbrowser
+        has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+        if has_display or os.name == "nt" or sys.platform == "darwin":
+            opened = webbrowser.open(file_uri)
+    except Exception:
+        opened = False
+
+    if opened:
+        print(f"[🌐] Opened visualization in web browser: {path_obj.name}")
+        print(f"    Link: {file_uri}")
+    else:
+        print(f"[📄] Visualizer saved. Open in browser: {file_uri}")
+
+    return opened
 
 
