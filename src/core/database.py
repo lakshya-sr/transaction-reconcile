@@ -264,3 +264,4 @@ def save_graph_edges(erp_gw_edges: list, gw_bank_edges: list, db_path: Path):
     finally:
         conn.close()
 
+initialize_database_schema = init_database

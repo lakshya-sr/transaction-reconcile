@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Train the Cluster-Level Residual XGBoost Classifier.
+Training module for both GW↔Bank and ERP↔GW XGBoost models.
 
-Optimizes for PR-AUC on hard negatives and exports model and calibrated
-probability threshold artifacts.
+Contains:
+- train_gateway_bank_model(): Train GW↔Bank classifier
+- train_erp_gateway_model(): Train ERP↔GW classifier
+- select_calibrated_threshold(): Calibrate decision threshold
 """
 
 import json
@@ -19,14 +21,9 @@ ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from src.ai.features import FEATURE_COLUMNS
+from src.ai.features import GATEWAY_BANK_FEATURES, ERP_GATEWAY_FEATURES
 
-DATA_PATH = ROOT_DIR / "data" / "raw" / "train_features.csv"
 ARTIFACT_DIR = ROOT_DIR / "src" / "ai" / "artifacts"
-MODEL_PATH = ARTIFACT_DIR / "xgb_gw_bank.json"
-THRESHOLD_PATH = ARTIFACT_DIR / "xgb_gw_bank_threshold.json"
-SCHEMA_PATH = ARTIFACT_DIR / "feature_schema.json"
-
 MIN_PRECISION_TARGET = 0.98
 
 
@@ -35,6 +32,7 @@ def select_calibrated_threshold(
     probabilities: np.ndarray,
     min_precision: float = MIN_PRECISION_TARGET,
 ) -> float:
+    """Select threshold that maximizes F1 while maintaining minimum precision."""
     precisions, recalls, thresholds = precision_recall_curve(y_true, probabilities)
     if len(thresholds) == 0:
         return 0.50
@@ -54,19 +52,26 @@ def select_calibrated_threshold(
         candidates.sort(key=lambda x: (x[0], x[2]), reverse=True)
         return candidates[0][1]
 
-    # Fallback: Pick highest precision threshold
     best_p_idx = int(np.argmax(precisions))
     return float(thresholds[best_p_idx])
 
 
-def train_and_export():
-    if not DATA_PATH.exists():
-        raise FileNotFoundError(f"Training dataset not found at {DATA_PATH}. Run dataset_builder first.")
+def _train_model(
+    data_path: Path,
+    feature_columns: list,
+    model_path: Path,
+    threshold_path: Path,
+    schema_path: Path,
+    model_name: str,
+) -> None:
+    """Generic model training function."""
+    if not data_path.exists():
+        raise FileNotFoundError(f"Training dataset not found at {data_path}")
 
-    df = pd.read_csv(DATA_PATH)
-    print(f"[*] Loaded {len(df)} samples from {DATA_PATH}")
+    df = pd.read_csv(data_path)
+    print(f"[*] Loaded {len(df)} samples from {data_path}")
 
-    X = df[FEATURE_COLUMNS].copy()
+    X = df[feature_columns].copy()
     y = df["label"].astype(int)
 
     X_train, X_test, y_train, y_test = train_test_split(
@@ -90,42 +95,79 @@ def train_and_export():
         scale_pos_weight=scale_pos,
         random_state=42,
         n_jobs=-1,
+        tree_method='hist',
     )
 
-    print("[*] Training XGBoost classifier...")
+    print(f"[*] Training {model_name} XGBoost classifier...")
     model.fit(X_train, y_train)
 
     # Evaluate
     test_probs = model.predict_proba(X_test)[:, 1]
     ap_score = average_precision_score(y_test, test_probs)
-    calibrated_threshold = select_calibrated_threshold(y_test, test_probs, min_precision=MIN_PRECISION_TARGET)
+    calibrated_threshold = select_calibrated_threshold(y_test, test_probs)
 
-    # Threshold performance
     y_pred_calibrated = (test_probs >= calibrated_threshold).astype(int)
     print(f"[✔] PR-AUC (Average Precision): {ap_score:.4f}")
     print(f"[✔] Calibrated Decision Threshold: {calibrated_threshold:.4f}")
     print("\n--- Test Set Classification Report ---")
     print(classification_report(y_test, y_pred_calibrated, digits=4))
 
-    # Export Artifacts
+    # Export artifacts
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
-    model.save_model(str(MODEL_PATH))
+    model.save_model(str(model_path))
 
     threshold_payload = {
         "threshold": round(float(calibrated_threshold), 4),
         "min_precision_target": MIN_PRECISION_TARGET,
         "pr_auc": round(float(ap_score), 4),
-        "feature_columns": FEATURE_COLUMNS,
+        "feature_columns": feature_columns,
     }
-    THRESHOLD_PATH.write_text(json.dumps(threshold_payload, indent=2), encoding="utf-8")
-    SCHEMA_PATH.write_text(json.dumps(FEATURE_COLUMNS, indent=2), encoding="utf-8")
+    threshold_path.write_text(json.dumps(threshold_payload, indent=2), encoding="utf-8")
+    schema_path.write_text(json.dumps(feature_columns, indent=2), encoding="utf-8")
 
-    print(f"[✔] Exported Model: {MODEL_PATH}")
-    print(f"[✔] Exported Threshold Config: {THRESHOLD_PATH}")
+    print(f"[✔] Exported Model: {model_path}")
+    print(f"[✔] Exported Threshold Config: {threshold_path}")
+
+
+def train_gateway_bank_model():
+    """Train GW↔Bank XGBoost classifier."""
+    data_path = ROOT_DIR / "data" / "raw" / "train_features.csv"
+    model_path = ARTIFACT_DIR / "xgb_gw_bank.json"
+    threshold_path = ARTIFACT_DIR / "xgb_gw_bank_threshold.json"
+    schema_path = ARTIFACT_DIR / "feature_schema.json"
+    
+    _train_model(
+        data_path=data_path,
+        feature_columns=GATEWAY_BANK_FEATURES,
+        model_path=model_path,
+        threshold_path=threshold_path,
+        schema_path=schema_path,
+        model_name="Gateway↔Bank",
+    )
+
+
+def train_erp_gateway_model():
+    """Train ERP↔GW XGBoost classifier."""
+    data_path = ROOT_DIR / "data" / "raw" / "erp_gw_train_features.csv"
+    model_path = ARTIFACT_DIR / "xgb_erp_gw.json"
+    threshold_path = ARTIFACT_DIR / "xgb_erp_gw_threshold.json"
+    schema_path = ARTIFACT_DIR / "erp_gw_feature_schema.json"
+    
+    _train_model(
+        data_path=data_path,
+        feature_columns=ERP_GATEWAY_FEATURES,
+        model_path=model_path,
+        threshold_path=threshold_path,
+        schema_path=schema_path,
+        model_name="ERP↔Gateway",
+    )
 
 
 def main():
-    train_and_export()
+    """Train both models."""
+    train_gateway_bank_model()
+    print()
+    train_erp_gateway_model()
 
 
 if __name__ == "__main__":
