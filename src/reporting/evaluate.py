@@ -92,15 +92,15 @@ def main():
     print(tabulate(metrics_table, headers=headers, tablefmt="fancy_grid"))
     print("=" * 100)
 
-    # if fp_rows:
-    #     print("FALSE POSITIVE EDGE DETAILS (with production stage)")
-    #     fp_df = pd.DataFrame(fp_rows)
-    #     print(tabulate(
-    #         fp_df[["Layer", "Left", "Right", "Stage"]].values.tolist(),
-    #         headers=["Layer", "Left", "Right", "Stage"],
-    #         tablefmt="fancy_grid",
-    #     ))
-    #     print("=" * 100)
+    if fp_rows:
+        print("FALSE POSITIVE EDGE DETAILS (with production stage)")
+        fp_df = pd.DataFrame(fp_rows)
+        print(tabulate(
+            fp_df[["Layer", "Left", "Right", "Stage"]].values.tolist(),
+            headers=["Layer", "Left", "Right", "Stage"],
+            tablefmt="fancy_grid",
+        ))
+        print("=" * 100)
 
 
 if __name__ == "__main__":

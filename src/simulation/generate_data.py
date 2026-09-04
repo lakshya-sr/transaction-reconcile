@@ -329,8 +329,8 @@ class BankAgent:
 
 
 def run_continuous_simulation(days: int = SIMULATION_DEFAULT_DAYS, seed: Optional[int] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    if seed is not None:
-        random.seed(seed)
+    # if seed is not None:
+    #     random.seed(seed)
 
     registry = GroundTruthRegistry()
     erp = ERPAgent()

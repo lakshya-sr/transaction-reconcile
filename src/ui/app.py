@@ -7,7 +7,7 @@ Features:
   - Tab 1: Interactive PyVis Graph (Solid Grey for Deterministic, Dashed Purple for AI)
   - Tab 2: AI Inference Insights (Plotly Confidence Histogram, Truncated UTR / NLP recovery table)
   - Tab 3: Full Filterable Audit Ledger
-  - Tab 4: True Suspense Ledger (The Unreconciled Orphans)
+  - Tab 4: True Suspense Ledger (Unreconciled & Partially Matched Records)
 """
 
 import json
@@ -178,12 +178,7 @@ def build_pyvis_network_from_visualizer(
     max_components: int = 45,
     heading_title: str = "Reconciliation Graph Network",
 ) -> Path:
-    """
-    Reuses the graph construction and 3-column grid layout from src.reporting.visualizer.
-    Applies the required edge differentiation:
-      - Solid Thick Grey line (#9E9E9E) for Deterministic (Exact/Bulk/SubsetSum)
-      - Dashed Bright Purple line (#9C27B0) for AI / Probabilistic (XGBoost/Fuzzy)
-    """
+    """Build PyVis network from visualizer data."""
     df_erp = data.get("erp", pd.DataFrame())
     df_gw = data.get("gw", pd.DataFrame())
     df_bank = data.get("bank", pd.DataFrame())
@@ -196,14 +191,6 @@ def build_pyvis_network_from_visualizer(
     gw_dict = df_gw.set_index("payment_id").to_dict("index") if not df_gw.empty else {}
     bnk_dict = df_bank.set_index("bank_entry_id").to_dict("index") if not df_bank.empty else {}
 
-    # Filter to top components if graph is large
-    active_bank = set(df_pgb["bank_entry_id"].dropna()) if not df_pgb.empty else set()
-    # if max_components and len(active_bank) > max_components:
-    #     selected_banks = set(list(active_bank)[:max_components])
-    #     df_pgb_sub = df_pgb[df_pgb["bank_entry_id"].isin(selected_banks)]
-    #     selected_gws = set(df_pgb_sub["gateway_payment_id"].dropna())
-    #     df_peg_sub = df_peg[df_peg["gateway_payment_id"].isin(selected_gws)]
-    # else:
     df_peg_sub = df_peg
     df_pgb_sub = df_pgb
 
@@ -226,24 +213,18 @@ def build_pyvis_network_from_visualizer(
                 row_data = erp_dict.get(e_id, {})
                 label = e_id.split("-")[-1] if "-" in e_id else e_id
                 G.add_node(
-                    e_id,
-                    group=1,
-                    color=COLOR_ERP,
+                    e_id, group=1, color=COLOR_ERP,
                     title=get_erp_html(e_id, row_data, is_matched=True),
-                    label=label,
-                    size=20,
+                    label=label, size=20,
                 )
 
             if not G.has_node(g_id):
                 row_data = gw_dict.get(g_id, {})
                 label = g_id.split("-")[-1] if "-" in g_id else g_id
                 G.add_node(
-                    g_id,
-                    group=2,
-                    color=COLOR_GW,
+                    g_id, group=2, color=COLOR_GW,
                     title=get_gw_html(g_id, row_data, is_matched=True),
-                    label=label,
-                    size=20,
+                    label=label, size=20,
                 )
 
             tooltip = (
@@ -254,14 +235,7 @@ def build_pyvis_network_from_visualizer(
                 f"<b>Confidence Score:</b> {score:.4f}<br>"
                 f"<b>Audit Notes:</b> {notes}"
             )
-            G.add_edge(
-                e_id,
-                g_id,
-                title=tooltip,
-                color=edge_color,
-                dashes=is_ai,
-                width=2.5,
-            )
+            G.add_edge(e_id, g_id, title=tooltip, color=edge_color, dashes=is_ai, width=2.5)
 
     # 2. Gateway <-> Bank Edges
     if not df_pgb_sub.empty:
@@ -282,24 +256,18 @@ def build_pyvis_network_from_visualizer(
                 row_data = gw_dict.get(g_id, {})
                 label = g_id.split("-")[-1] if "-" in g_id else g_id
                 G.add_node(
-                    g_id,
-                    group=2,
-                    color=COLOR_GW,
+                    g_id, group=2, color=COLOR_GW,
                     title=get_gw_html(g_id, row_data, is_matched=True),
-                    label=label,
-                    size=20,
+                    label=label, size=20,
                 )
 
             if not G.has_node(b_id):
                 row_data = bnk_dict.get(b_id, {})
                 label = b_id.split("-")[-1] if "-" in b_id else b_id
                 G.add_node(
-                    b_id,
-                    group=3,
-                    color=COLOR_BNK,
+                    b_id, group=3, color=COLOR_BNK,
                     title=get_bnk_html(b_id, row_data, is_matched=True),
-                    label=label,
-                    size=24,
+                    label=label, size=24,
                 )
 
             tooltip = (
@@ -310,25 +278,18 @@ def build_pyvis_network_from_visualizer(
                 f"<b>Confidence Score:</b> {score:.4f}<br>"
                 f"<b>Audit Notes:</b> {notes}"
             )
-            G.add_edge(
-                g_id,
-                b_id,
-                title=tooltip,
-                color=edge_color,
-                dashes=is_ai,
-                width=2.5,
-            )
+            G.add_edge(g_id, b_id, title=tooltip, color=edge_color, dashes=is_ai, width=2.5)
 
-    # Compute deterministic 3-column grid layout
+    # Compute layout
     compute_grid_layout(G)
 
-    # Custom legend for in-canvas HTML banner
+    # Custom legend
     custom_legend = (
         "<span style='color:#9E9E9E;'>━━━━ Solid Grey: Deterministic Match</span> &nbsp;&nbsp;&nbsp;"
         "<span style='color:#9C27B0;'>- - - Dashed Purple: AI / Probabilistic Match</span>"
     )
 
-    # Render HTML using visualizer's full interactive template
+    # Render HTML
     output_html_path = Path("/tmp/graph.html")
     try:
         render_graph_html(
@@ -379,11 +340,11 @@ def main():
     # Top KPI Metrics Row
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        st.metric("Total Transactions", f"{kpis['total_txns']:,}", help="Sum of ERP, Gateway Settlements, and Bank Deposits")
+        st.metric("Total Transactions", f"{kpis['total_txns']:,}")
     with c2:
-        st.metric("Deterministic Matches", f"{kpis['det_matches']:,}", delta="Solid Grey Edges", delta_color="off")
+        st.metric("Deterministic Matches", f"{kpis['det_matches']:,}")
     with c3:
-        st.metric("AI / Probabilistic Matches", f"{kpis['ai_matches']:,}", delta="Dashed Purple Edges", delta_color="normal")
+        st.metric("AI / Probabilistic Matches", f"{kpis['ai_matches']:,}")
     with c4:
         st.metric("Layer 1 (ERP↔GW) Prec", f"{kpis['layer1_p']:.1f}%", f"Rec: {kpis['layer1_r']:.1f}%")
     with c5:
@@ -396,7 +357,7 @@ def main():
         "🕸️ Tab 1: The Graph Network",
         "🧠 Tab 2: AI Inference & Insights",
         "📋 Tab 3: Full Audit Ledger",
-        "⚠️ Tab 4: True Suspense Ledger (The 2%)",
+        "⚠️ Tab 4: True Suspense Ledger",
     ])
 
     # =========================================================================
@@ -409,19 +370,17 @@ def main():
         with col_ctrl1:
             st.markdown("""
             **Graph Legend**:
-            - 🟦 **ERP Order Nodes** (Left Column) &nbsp;|&nbsp; 🟨 **Gateway Payments** (Middle Column) &nbsp;|&nbsp; 🟩 **Bank Deposits** (Right Column)
-            - ➖ **Solid Grey Edge (`#9E9E9E`)**: Deterministic Match (Exact / Bulk / Tier 1 / Subset Sum)
-            - 🟪 **Dashed Purple Edge (`#9C27B0`)**: AI Probabilistic Match (XGBoost Residual / Fuzzy)
+            - 🟦 **ERP Order Nodes** (Left Column) | 🟨 **Gateway Payments** (Middle Column) | 🟩 **Bank Deposits** (Right Column)
+            - ➖ **Solid Grey Edge**: Deterministic Match
+            - 🟪 **Dashed Purple Edge**: AI Probabilistic Match
             """)
         with col_ctrl2:
-            max_c = st.slider("Max Bank Clusters to Render", min_value=10, max_value=300, value=35, step=5)
+            max_c = st.slider("Max Bank Clusters", min_value=10, max_value=300, value=35, step=5)
 
-        with st.spinner("Rendering visualizer grid network with side-panel inspection..."):
+        with st.spinner("Rendering network..."):
             tmp_path = build_pyvis_network_from_visualizer(data, max_components=max_c)
-
             with open(tmp_path, "r", encoding="utf-8") as f:
                 html_content = f.read()
-
             components.html(html_content, height=750, scrolling=True)
 
     # =========================================================================
@@ -433,7 +392,6 @@ def main():
         df_pgb = data.get("pred_gb", pd.DataFrame())
         df_peg = data.get("pred_eg", pd.DataFrame())
 
-        # Filter strictly for AI/Fuzzy matches
         ai_pgb = df_pgb[df_pgb["matching_stage"].str.contains("AI|Fuzzy", case=False, na=False)].copy() if not df_pgb.empty else pd.DataFrame()
         ai_peg = df_peg[df_peg["matching_stage"].str.contains("AI|Fuzzy", case=False, na=False)].copy() if not df_peg.empty else pd.DataFrame()
 
@@ -445,64 +403,33 @@ def main():
         col_ai1, col_ai2 = st.columns([1, 1])
 
         with col_ai1:
-            st.markdown("#### XGBoost Probability Calibration Distribution")
+            st.markdown("#### XGBoost Probability Distribution")
             if not ai_combined.empty and "confidence_score" in ai_combined.columns:
                 fig = px.histogram(
                     ai_combined,
                     x="confidence_score",
                     color="Layer",
                     nbins=25,
-                    title="Model Confidence Score Distribution (Threshold $T^* = 0.9836$)",
-                    labels={"confidence_score": "Calibrated Prediction Probability (P)"},
-                    color_discrete_map={"Layer 1: ERP ↔ Gateway": "#1E88E5", "Layer 2: Gateway ↔ Bank": "#8E24AA"},
+                    labels={"confidence_score": "Prediction Probability"},
                 )
-                fig.add_vline(x=0.9836, line_width=2, line_dash="dash", line_color="red", annotation_text="Threshold (0.9836)")
-                fig.update_layout(bargap=0.1, template="plotly_white", margin=dict(l=20, r=20, t=40, b=20))
+                fig.update_layout(bargap=0.1, template="plotly_white")
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                st.info("No probabilistic AI matches found in current dataset.")
+                st.info("No probabilistic AI matches found.")
 
         with col_ai2:
             st.markdown("#### Noise Patterns Resolved by AI")
             st.markdown("""
-            The residual XGBoost model resolved edge cases that bypassed the deterministic waterfall:
-            - **Truncated UTR Tokens**: Suffix-stripped narratives (e.g. `UTR98234812` $\\to$ `UTR982348...`).
-            - **Missing & Corrupted Invoices**: Matches reconstructed via multi-transaction sum + timestamp proximity.
-            - **N:1 Merchant Daily Batch Rollups**: Aggregates $k$ gateway disbursements settled into a single lump bank deposit.
-            - **Fee / GST Rounding Drifts**: Non-linear penny variances accounted for by feature engineering.
+            - **Truncated UTR Tokens**
+            - **Missing & Corrupted Invoices**
+            - **N:1 Batch Rollups**
+            - **Fee / GST Rounding Drifts**
             """)
-
-            st.metric(
-                "Total Residual AI Matches Established",
-                f"{len(ai_combined):,}",
-                delta="0 False Positives at calibrated threshold",
-                delta_color="normal",
-            )
+            st.metric("Total AI Matches", f"{len(ai_combined):,}")
 
         st.markdown("#### Detailed AI Matched Clusters")
         if not ai_combined.empty:
-            st.dataframe(
-                ai_combined[[
-                    "Layer",
-                    "gateway_payment_id",
-                    "bank_entry_id",
-                    "allocated_amount",
-                    "match_type",
-                    "matching_stage",
-                    "confidence_score",
-                    "notes",
-                ]].rename(columns={
-                    "gateway_payment_id": "Gateway ID",
-                    "bank_entry_id": "Bank / ERP Partner ID",
-                    "allocated_amount": "Allocated Amount (₹)",
-                    "match_type": "Type",
-                    "matching_stage": "Stage",
-                    "confidence_score": "Confidence",
-                    "notes": "Resolution Notes",
-                }),
-                use_container_width=True,
-                height=300,
-            )
+            st.dataframe(ai_combined, use_container_width=True, height=300)
 
     # =========================================================================
     # TAB 3: FULL AUDIT LEDGER
@@ -530,7 +457,6 @@ def main():
         if unified_edges:
             df_unified = pd.concat(unified_edges, ignore_index=True)
 
-            # Filtering Bar
             col_f1, col_f2, col_f3 = st.columns([1, 1, 2])
             with col_f1:
                 layer_choice = st.selectbox("Filter Layer", ["All", "ERP ↔ Gateway", "Gateway ↔ Bank"])
@@ -538,7 +464,7 @@ def main():
                 all_stages = ["All"] + sorted(df_unified["matching_stage"].dropna().unique().tolist())
                 stage_choice = st.selectbox("Filter Stage", all_stages)
             with col_f3:
-                search_query = st.text_input("🔍 Search by Entity ID (ERP, GW, or BNK)", "").strip()
+                search_query = st.text_input("🔍 Search by Entity ID", "").strip()
 
             filtered_df = df_unified.copy()
             if layer_choice != "All":
@@ -551,35 +477,12 @@ def main():
                     filtered_df["Right_Entity"].str.contains(search_query, case=False, na=False)
                 ]
 
-            st.write(f"Showing **{len(filtered_df):,}** of **{len(df_unified):,}** reconciliation edges:")
+            st.write(f"Showing **{len(filtered_df):,}** of **{len(df_unified):,}** edges:")
+            st.dataframe(filtered_df, use_container_width=True, height=450)
 
-            st.dataframe(
-                filtered_df[[
-                    "Layer",
-                    "Left_Entity",
-                    "Right_Entity",
-                    "allocated_amount",
-                    "match_type",
-                    "matching_stage",
-                    "confidence_score",
-                    "notes",
-                ]].rename(columns={
-                    "Left_Entity": "Source Record",
-                    "Right_Entity": "Target Record",
-                    "allocated_amount": "Amount (₹)",
-                    "match_type": "Match Type",
-                    "matching_stage": "Stage",
-                    "confidence_score": "Confidence",
-                    "notes": "Audit Notes",
-                }),
-                use_container_width=True,
-                height=450,
-            )
-
-            # CSV Download
             csv_data = filtered_df.to_csv(index=False).encode("utf-8")
             st.download_button(
-                label="📥 Export Filtered Audit Ledger as CSV",
+                label="📥 Export as CSV",
                 data=csv_data,
                 file_name="reconciliation_audit_ledger.csv",
                 mime="text/csv",
@@ -588,11 +491,11 @@ def main():
             st.info("No prediction edges available.")
 
     # =========================================================================
-    # TAB 4: TRUE SUSPENSE LEDGER (The 2%)
+    # TAB 4: TRUE SUSPENSE LEDGER
     # =========================================================================
     with tab4:
-        st.subheader("True Suspense Ledger — Unreconciled Orphans (The ~2%)")
-        st.caption("Records that survived BOTH the deterministic waterfall and the XGBoost residual sweep without meeting strict threshold constraints.")
+        st.subheader("True Suspense Ledger — Unreconciled & Partially Matched Records")
+        st.caption("Records that don't have complete reconciliation chains (ERP → Gateway → Bank)")
 
         df_erp = data.get("erp", pd.DataFrame())
         df_gw = data.get("gw", pd.DataFrame())
@@ -600,54 +503,122 @@ def main():
         df_peg = data.get("pred_eg", pd.DataFrame())
         df_pgb = data.get("pred_gb", pd.DataFrame())
 
-        claimed_erp = set(df_peg["erp_order_id"].dropna()) if not df_peg.empty else set()
-        claimed_gw_e = set(df_peg["gateway_payment_id"].dropna()) if not df_peg.empty else set()
-        claimed_gw_b = set(df_pgb["gateway_payment_id"].dropna()) if not df_pgb.empty else set()
-        claimed_bank = set(df_pgb["bank_entry_id"].dropna()) if not df_pgb.empty else set()
+        # Get matched IDs
+        erp_with_gw = set(df_peg["erp_order_id"].dropna()) if not df_peg.empty else set()
+        gw_with_erp = set(df_peg["gateway_payment_id"].dropna()) if not df_peg.empty else set()
+        gw_with_bank = set(df_pgb["gateway_payment_id"].dropna()) if not df_pgb.empty else set()
+        bank_with_gw = set(df_pgb["bank_entry_id"].dropna()) if not df_pgb.empty else set()
+        
+        all_erp_ids = set(df_erp["erp_entry_id"]) if not df_erp.empty else set()
+        all_gw_ids = set(df_gw["payment_id"]) if not df_gw.empty else set()
+        all_bank_ids = set(df_bank["bank_entry_id"]) if not df_bank.empty else set()
+        
+        # Categorize
+        matched_erp_ids = erp_with_gw
+        unmatched_erp_ids = all_erp_ids - erp_with_gw
+        
+        fully_matched_gw_ids = gw_with_erp & gw_with_bank
+        partially_matched_gw_ids = gw_with_erp ^ gw_with_bank
+        unmatched_gw_ids = all_gw_ids - gw_with_erp - gw_with_bank
+        
+        matched_bank_ids = bank_with_gw
+        unmatched_bank_ids = all_bank_ids - bank_with_gw
+        
+        # Create DataFrames
+        unmatched_erp = df_erp[df_erp["erp_entry_id"].isin(unmatched_erp_ids)].copy() if not df_erp.empty else pd.DataFrame()
+        unmatched_gw = df_gw[df_gw["payment_id"].isin(unmatched_gw_ids)].copy() if not df_gw.empty else pd.DataFrame()
+        partially_matched_gw = df_gw[df_gw["payment_id"].isin(partially_matched_gw_ids)].copy() if not df_gw.empty else pd.DataFrame()
+        unmatched_bank = df_bank[df_bank["bank_entry_id"].isin(unmatched_bank_ids)].copy() if not df_bank.empty else pd.DataFrame()
 
-        orphan_erp = df_erp[~df_erp["erp_entry_id"].isin(claimed_erp)].copy() if not df_erp.empty else pd.DataFrame()
-        orphan_gw = df_gw[~df_gw["payment_id"].isin(claimed_gw_b)].copy() if not df_gw.empty else pd.DataFrame()
-        orphan_bank = df_bank[~df_bank["bank_entry_id"].isin(claimed_bank)].copy() if not df_bank.empty else pd.DataFrame()
-
-        s1, s2, s3 = st.columns(3)
-        with s1:
-            st.error(f"**Unmatched ERP Orders**: {len(orphan_erp):,}")
-            if not orphan_erp.empty:
-                st.write(f"Suspense Value: **₹{orphan_erp['gross_amount'].sum():,.2f}**")
-        with s2:
-            st.warning(f"**Unmatched Gateway Settlements**: {len(orphan_gw):,}")
-            if not orphan_gw.empty:
-                st.write(f"Suspense Value: **₹{orphan_gw['net_settled'].sum():,.2f}**")
-        with s3:
-            st.info(f"**Unmatched Bank Deposits**: {len(orphan_bank):,}")
-            if not orphan_bank.empty:
-                st.write(f"Suspense Value: **₹{orphan_bank['credit_amount'].sum():,.2f}**")
+        # Summary
+        st.markdown("### 📊 Suspense Ledger Summary")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.markdown("#### 🟦 ERP Orders")
+            st.metric("Unmatched", len(unmatched_erp))
+            st.metric("Matched", len(matched_erp_ids))
+            if not unmatched_erp.empty:
+                st.write(f"Value: **₹{unmatched_erp['gross_amount'].sum():,.2f}**")
+        
+        with col2:
+            st.markdown("#### 🟨 Gateway Payments")
+            st.metric("Unmatched", len(unmatched_gw))
+            st.metric("Partially Matched", len(partially_matched_gw))
+            st.metric("Fully Matched", len(fully_matched_gw_ids))
+            if not unmatched_gw.empty:
+                st.write(f"Unmatched: **₹{unmatched_gw['net_settled'].sum():,.2f}**")
+            if not partially_matched_gw.empty:
+                st.write(f"Partial: **₹{partially_matched_gw['net_settled'].sum():,.2f}**")
+        
+        with col3:
+            st.markdown("#### 🟩 Bank Deposits")
+            st.metric("Unmatched", len(unmatched_bank))
+            st.metric("Matched", len(matched_bank_ids))
+            if not unmatched_bank.empty:
+                st.write(f"Value: **₹{unmatched_bank['credit_amount'].sum():,.2f}**")
 
         st.markdown("---")
-
-        suspense_choice = st.radio(
-            "Select Suspense Entity View:",
-            ["Unmatched Bank Deposits", "Unmatched Gateway Settlements", "Unmatched ERP Orders"],
-            horizontal=True,
-        )
-
-        if suspense_choice == "Unmatched Bank Deposits":
-            if not orphan_bank.empty:
-                st.dataframe(orphan_bank, use_container_width=True)
+        
+        # Detailed views
+        st.markdown("### 🔍 Detailed Views")
+        
+        detail_tab1, detail_tab2, detail_tab3 = st.tabs([
+            "🟦 ERP Orders",
+            "🟨 Gateway Payments", 
+            "🟩 Bank Deposits"
+        ])
+        
+        with detail_tab1:
+            if not unmatched_erp.empty:
+                st.write(f"**{len(unmatched_erp)} ERP orders with no gateway link:**")
+                st.dataframe(unmatched_erp, use_container_width=True)
             else:
-                st.success("No unmatched bank deposits found!")
-
-        elif suspense_choice == "Unmatched Gateway Settlements":
-            if not orphan_gw.empty:
-                st.dataframe(orphan_gw, use_container_width=True)
+                st.success("✅ All ERP orders are matched!")
+        
+        with detail_tab2:
+            gw_sub1, gw_sub2, gw_sub3 = st.tabs([
+                f"Unmatched ({len(unmatched_gw)})",
+                f"Partially Matched ({len(partially_matched_gw)})",
+                f"Fully Matched ({len(fully_matched_gw_ids)})"
+            ])
+            
+            with gw_sub1:
+                if not unmatched_gw.empty:
+                    display_gw = unmatched_gw.copy()
+                    display_gw["Status"] = "No ERP or Bank link"
+                    st.dataframe(display_gw, use_container_width=True)
+                else:
+                    st.success("✅ No unmatched gateways!")
+            
+            with gw_sub2:
+                if not partially_matched_gw.empty:
+                    display_pgw = partially_matched_gw.copy()
+                    def get_status(gw_id):
+                        if gw_id in gw_with_erp and gw_id not in gw_with_bank:
+                            return "Has ERP → Missing Bank"
+                        elif gw_id in gw_with_bank and gw_id not in gw_with_erp:
+                            return "Has Bank → Missing ERP"
+                        return "Unknown"
+                    display_pgw["Status"] = display_pgw["payment_id"].apply(get_status)
+                    st.dataframe(display_pgw, use_container_width=True)
+                else:
+                    st.success("✅ No partially matched gateways!")
+            
+            with gw_sub3:
+                matched_gw = df_gw[df_gw["payment_id"].isin(fully_matched_gw_ids)].copy() if not df_gw.empty else pd.DataFrame()
+                if not matched_gw.empty:
+                    st.dataframe(matched_gw, use_container_width=True)
+                else:
+                    st.info("No fully matched gateways.")
+        
+        with detail_tab3:
+            if not unmatched_bank.empty:
+                st.write(f"**{len(unmatched_bank)} bank deposits with no gateway link:**")
+                st.dataframe(unmatched_bank, use_container_width=True)
             else:
-                st.success("No unmatched gateway settlements found!")
-
-        elif suspense_choice == "Unmatched ERP Orders":
-            if not orphan_erp.empty:
-                st.dataframe(orphan_erp, use_container_width=True)
-            else:
-                st.success("No unmatched ERP orders found!")
+                st.success("✅ All bank deposits are matched!")
 
 
 if __name__ == "__main__":

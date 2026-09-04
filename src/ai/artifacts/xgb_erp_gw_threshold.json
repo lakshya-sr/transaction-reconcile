@@ -1,0 +1,18 @@
+{
+  "threshold": 0.9369,
+  "min_precision_target": 0.98,
+  "pr_auc": 1.0,
+  "feature_columns": [
+    "cluster_size",
+    "gross_diff_abs",
+    "gross_diff_pct",
+    "time_delta_min_hrs",
+    "time_delta_max_hrs",
+    "time_span_hrs",
+    "best_invoice_fuzz",
+    "invoice_prefix_match",
+    "invoice_token_overlap",
+    "exact_invoice_match",
+    "is_single_day"
+  ]
+}
