@@ -169,8 +169,8 @@ from src.reporting.visualizer import (
 )
 
 # Visual Constants for Deterministic vs AI
-COLOR_DETERMINISTIC_EDGE = "#9E9E9E"  # Solid Grey
-COLOR_AI_EDGE = "#9C27B0"             # Dashed Bright Purple
+COLOR_DETERMINISTIC_EDGE = "#00FF00"  # Solid Grey
+COLOR_AI_EDGE = "#00FF00"             # Dashed Bright Purple
 
 
 def build_pyvis_network_from_visualizer(
@@ -235,7 +235,7 @@ def build_pyvis_network_from_visualizer(
                 f"<b>Confidence Score:</b> {score:.4f}<br>"
                 f"<b>Audit Notes:</b> {notes}"
             )
-            G.add_edge(e_id, g_id, title=tooltip, color=edge_color, dashes=is_ai, width=2.5)
+            G.add_edge(e_id, g_id, title=tooltip, color=edge_color, dashes=is_ai, width=5)
 
     # 2. Gateway <-> Bank Edges
     if not df_pgb_sub.empty:

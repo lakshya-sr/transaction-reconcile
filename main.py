@@ -44,6 +44,7 @@ def main():
 
     # Core Pipeline Phases
     parser.add_argument("--generate", "-g", action="store_true", help="Generate synthetic noisy data (JSON/CSV)")
+    parser.add_argument("--generate-days", type=int, default=5, help="Number of days to simulate (default: 5)")
     parser.add_argument("--setup-db", "-d", action="store_true", help="Initialize SQLite DB and ingest raw data")
     parser.add_argument("--match", "-m", action="store_true", help="Run the deterministic matching engine")
     parser.add_argument("--infer", "-i", action="store_true", help="Run AI inference on unmatched records")
@@ -184,7 +185,7 @@ def main():
     
     # Phase 1: Generate data
     if args.all or args.generate:
-        print_banner("PHASE 1: SYNTHETIC DATA GENERATION")
+        print_banner(f"PHASE 1: SYNTHETIC DATA GENERATION ({args.generate_days} days)")
         with suppress_stdout(suppress_internal):
             generate_data.main()
         if not is_quiet and not is_verbose:

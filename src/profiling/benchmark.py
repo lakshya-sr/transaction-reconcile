@@ -11,17 +11,19 @@ import tracemalloc
 from typing import Dict, List, Optional, Tuple
 import pandas as pd
 from tabulate import tabulate
+import argparse
+import random
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from src.core.config import DB_PATH
-from src.core.database import get_connection, initialize_database_schema
+from src.core.database import get_connection, init_database
 from src.simulation.generate_data import run_continuous_simulation, save_datasets
 from src.core.db_setup import main as run_db_setup
 from src.deterministic.matcher import ReconciliationEngine
-from src.ai.inference import run_gateway_bank_inference
+from src.ai.inference import run_residual_ai_inference
 from src.reporting.evaluate import calculate_metrics
 
 BENCHMARK_DIR = ROOT_DIR / "data" / "benchmarks"
@@ -97,7 +99,7 @@ class ReconciliationProfiler:
 
         # 4. AI Inference
         with StageTimer("4. AI Inference") as t:
-            ai_edges_count = run_gateway_bank_inference()
+            ai_edges_count = run_residual_ai_inference()
         self.stage_timings["4_ai_inference_ms"] = t.elapsed_ms
         self.stage_memory["4_ai_inference_mem_mb"] = t.peak_mem_mb
 
@@ -168,13 +170,10 @@ def print_profile_report(profile: Dict, title: str = "RECONCILIATION PROFILER RE
     print("=" * 90)
     print(f"[*] Workload: {counts['total_transactions']} Total Transactions "
           f"({counts['erp_records']} ERP, {counts['gateway_records']} GW, {counts['bank_records']} Bank)")
+    print(f"[*] Simulation Days: {profile['days']}, Seed: {profile['seed']}")
     print(tabulate(table_data, headers=["Stage", "Latency (ms)", "Share (%)", "Peak Memory"], tablefmt="fancy_grid"))
 
-    print(f"\n[⚡] Matching Throughput : {profile['throughput_matching_txns_per_sec']:,.1f} txns/sec")
-    print(f"[⚡] End-to-End Throughput: {profile['throughput_e2e_txns_per_sec']:,.1f} txns/sec")
-    print(f"[✔] Layer 1 Precision: {profile['layer1_precision']}% (Recall: {profile['layer1_recall']}%)")
-    print(f"[✔] Layer 2 Precision: {profile['layer2_precision']}% (Recall: {profile['layer2_recall']}%)")
-    print(f"[✔] AI Edges Created: {profile['ai_edges_count']}")
+    print(f"\n[⚡] Matching Throughput: {profile['throughput_matching_txns_per_sec']:,.1f} txns/sec")
     print("=" * 90 + "\n")
 
 
@@ -187,8 +186,6 @@ def compare_benchmarks(before: Dict, after: Dict):
         ["Total Matching Time", f"{before['total_match_time_ms']:.2f} ms", f"{after['total_match_time_ms']:.2f} ms", f"{match_speedup:.2f}x Faster"],
         ["End-to-End Time", f"{before['total_e2e_time_ms']:.2f} ms", f"{after['total_e2e_time_ms']:.2f} ms", f"{total_speedup:.2f}x Faster"],
         ["Matching Throughput", f"{before['throughput_matching_txns_per_sec']:,.1f} tps", f"{after['throughput_matching_txns_per_sec']:,.1f} tps", f"+{((after['throughput_matching_txns_per_sec'] - before['throughput_matching_txns_per_sec'])/before['throughput_matching_txns_per_sec'])*100:.1f}%"],
-        ["Layer 1 Precision", f"{before['layer1_precision']}%", f"{after['layer1_precision']}%", "Preserved"],
-        ["Layer 2 Precision", f"{before['layer2_precision']}%", f"{after['layer2_precision']}%", "Preserved"],
     ]
 
     print("\n" + "=" * 90)
@@ -200,7 +197,18 @@ def compare_benchmarks(before: Dict, after: Dict):
 
 def main():
     """Run benchmark and save results."""
-    profiler = ReconciliationProfiler(days=4, seed=42)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--days", type=int, default=30)
+    parser.add_argument("--seed", type=int, default=None)
+    args = parser.parse_args()
+
+    seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
+
+    print(f"Running benchmark:")
+    print(f"  • Days: {args.days}")
+    print(f"  • Seed: {seed}")
+
+    profiler = ReconciliationProfiler(days=args.days, seed=seed)
     profile = profiler.run_profile()
     print_profile_report(profile)
 
