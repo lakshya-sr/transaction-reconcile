@@ -5,13 +5,23 @@ Reconciles financial records in a three way situation of merchant ERP, payment g
 
 # Running
 
+The application is a cli tool. There is a dashboard but it is read-only, no modification to data can be performed from the dashboard.
+
 ## Github Codespaces
 
-[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/lakshya-sr/transaction-reconcile)
+## OGitHub Codespaces
+
+After opening wait for the setup to run and terminal to appear, then run the program using commands provided below.
+
+<a href="https://codespaces.new/lakshya-sr/transaction-reconcile" target="_blank" rel="noopener noreferrer">
+  <img src="https://github.com/codespaces/badge.svg" alt="Open in GitHub Codespaces" style="max-width: 200px;">
+</a>
 
 ```bash
 python main.py --all
-
+```
+then
+```bash
 python main.py --dashboard
 ```
 
