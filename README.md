@@ -9,13 +9,13 @@ The application is a cli tool. There is a dashboard but it is read-only, no modi
 
 ## Github Codespaces
 
-After opening wait for the setup to run and terminal to appear, then run the program using commands provided below. 
-
-After running the dashboard, switch to `Ports` tab and move pointer to the https link which will show three buttons, the middle button is for opening in browser, click that to open the dashboard.
+Use `Ctrl + Click` or `Right click > Open in New Tab` so you can continue to read the instruction here.
 
 <a href="https://codespaces.new/lakshya-sr/transaction-reconcile" target="_blank" rel="noopener noreferrer">
   <img src="https://github.com/codespaces/badge.svg" alt="Open in GitHub Codespaces" style="max-width: 200px;">
 </a>
+
+After opening wait for the setup to run and terminal to appear, then run the program using commands provided below. 
 
 ```bash
 python main.py --all
@@ -24,6 +24,8 @@ then
 ```bash
 python main.py --dashboard
 ```
+
+After running the dashboard, switch to `Ports` tab and move pointer to the https link which will show three buttons, the middle button is for opening in browser, click that to open the dashboard.
 
 ## Windows
 
