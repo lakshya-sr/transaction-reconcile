@@ -2,94 +2,113 @@
 
 Reconciles financial records in a three way situation of merchant ERP, payment gateway, and bank. Uses deterministic engine and AI based clustering to reconcile ERP receipts, payment gateway settlements, and bank statements. Supports one-to-one, one-to-many, many-to-one, and many-to-many relationships between records for both ERP-Gateway and Gateway-Bank reconcilaiation.
 
-## Running
 
-### One click run on Github Codespaces
+# Running
 
-### Windows
+## Github Codespaces
 
-### Linux
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/lakshya-sr/transaction-reconcile)
 
-#### 1. `pip` based
+## Windows
 
-#### 2. `uv` based
+```powershell
+# Clone repository
+git clone https://github.com/lakshya-sr/transaction-reconcile.git
+cd transaction-reconcile
 
-### MacOS (not tested)
+# Create virtual environment
+python -m venv .venv
+.venv\Scripts\activate
 
+# Install dependencies
+pip install -r requirements.txt
 
-## Database Schemas
+# Run full pipeline
+python main.py --all
 
-### 1. `erp_ledger` (ERPNext / BenchRec Standard)
-Tracks gross billing, customer accounts, and expected statutory tax withholding (TDS).
-```sql
-CREATE TABLE IF NOT EXISTS {TABLE_ERP} (
-    erp_entry_id TEXT PRIMARY KEY,
-    customer_account_id TEXT,
-    invoice_number TEXT,
-    gross_amount REAL,
-    tds_expected REAL,
-    currency TEXT,
-    entry_date TEXT,
-    status TEXT,
-    allocation_key TEXT
-);
+# Launch dashboard
+python main.py --dashboard
 ```
 
-### 2. `gateway_records` (Razorpay transaction API)
+## Linux
 
-```sql
-CREATE TABLE IF NOT EXISTS {TABLE_GATEWAY} (
-    payment_id TEXT PRIMARY KEY,
-    settlement_id TEXT,
-    gateway_status TEXT,
-    gross_amount REAL,
-    fee_deducted REAL,
-    tax_on_fee REAL,
-    net_settled REAL,
-    amount_reversed REAL,
-    settled_at TEXT,
-    bank_utr TEXT,
-    invoices TEXT
-)
+### 1. `pip` based
+
+```bash
+# Clone repository
+git clone https://github.com/lakshya-sr/transaction-reconcile.git
+cd transaction-reconcile
+
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run full pipeline
+python main.py --all
+
+# Launch dashboard
+python main.py --dashboard
 ```
 
-### 3. `bank_statement` (ISO 20022 CAMT.053 Standard)
-Modeled on ISO 20022 XML `<AcctSvcrRef>`, `<ValDt>`, and `<RmtInf>` standard tags.
-```sql
-CREATE TABLE IF NOT EXISTS {TABLE_BANK} (
-    bank_entry_id TEXT PRIMARY KEY,
-    value_date TEXT,
-    transaction_type TEXT,
-    credit_amount REAL,
-    debit_amount REAL,
-    running_balance REAL,
-    remittance_info TEXT,
-    reversal_indicator BOOLEAN
-);
+### 2. `uv` based
+
+```bash
+# Clone repository
+git clone https://github.com/lakshya-sr/transaction-reconcile.git
+cd transaction-reconcile
+
+# Install dependencies with uv
+uv pip install -r requirements.txt
+
+# Run full pipeline
+uv run main.py --all
+
+# Launch dashboard
+uv run main.py --dashboard
 ```
 
-### 4. `reconciled_edges` (Audit Trail Ledger)
-Tracks all records that have been matched so far.
-```sql
-CREATE TABLE IF NOT EXISTS erp_to_gateway_edges (
-    edge_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    erp_order_id TEXT NOT NULL,
-    gateway_payment_id TEXT NOT NULL,
-    allocated_amount REAL NOT NULL,
-    match_type TEXT NOT NULL,
-    confidence_score REAL NOT NULL,
-    notes TEXT
-)
+## MacOS (not tested)
 
-CREATE TABLE IF NOT EXISTS gateway_to_bank_edges (
-    edge_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    gateway_payment_id TEXT NOT NULL,
-    bank_entry_id TEXT NOT NULL,
-    allocated_amount REAL NOT NULL,
-    match_type TEXT NOT NULL,
-    confidence_score REAL NOT NULL,
-    notes TEXT
-)
+```bash
+# Clone repository
+git clone https://github.com/lakshya-sr/transaction-reconcile.git
+cd transaction-reconcile
+
+# Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run full pipeline
+python main.py --all
+
+# Launch dashboard
+python main.py --dashboard
 ```
 
+## Available Commands
+
+| Command | Description |
+|---------|-------------|
+| `python main.py --generate` | Generate synthetic data |
+| `python main.py --setup-db` | Initialize database |
+| `python main.py --match` | Run deterministic matching |
+| `python main.py --infer` | Run AI inference |
+| `python main.py --evaluate` | Evaluate accuracy |
+| `python main.py --benchmark` | Performance profiling |
+| `python main.py --dashboard` | Launch Streamlit UI |
+| `python main.py --all` | Run entire pipeline |
+| `python demo.py` | Step-by-step demo |
+
+
+# Gallery
+
+![Reconciled records graph](img/rec-graph.png)
+
+![Partially matched gateway transactions](img/matched.png)
 
