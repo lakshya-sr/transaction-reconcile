@@ -9,8 +9,6 @@ The application is a cli tool. There is a dashboard but it is read-only, no modi
 
 ## Github Codespaces
 
-## OGitHub Codespaces
-
 After opening wait for the setup to run and terminal to appear, then run the program using commands provided below.
 
 <a href="https://codespaces.new/lakshya-sr/transaction-reconcile" target="_blank" rel="noopener noreferrer">
