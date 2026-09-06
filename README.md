@@ -1,4 +1,4 @@
-# Multi-Source Reconciliation Agent
+# Hybrid Multi-Source Financial Reconciliation System
 
 Reconciles financial records in a three way situation of merchant ERP, payment gateway, and bank. Uses deterministic engine and AI based clustering to reconcile ERP receipts, payment gateway settlements, and bank statements. Supports one-to-one, one-to-many, many-to-one, and many-to-many relationships between records for both ERP-Gateway and Gateway-Bank reconcilaiation.
 
