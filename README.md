@@ -278,5 +278,4 @@ Because it is fast and reliable and explainable. Using the XGBoost model on all 
 
 ## 3. Why no interactive dashboard?
 
-I spent too long fine tuning the deterministic matcher and XGBoost model so didn't have enough time to implement an interactive dashboard. There is a dashboard but it is only for viewing data, and even that is not very good.
-
+I spent too long fine tuning the deterministic matcher and XGBoost model so didn't have enough time to implement an interactive dashboard. There is a dashboard but it is only for viewing data, and even that is not very good. Sorry.
